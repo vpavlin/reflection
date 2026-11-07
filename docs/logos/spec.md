@@ -58,8 +58,10 @@ A p2panda operation (`p2panda_core::Header<p2panda::operation::Extensions>`, CBO
 
 - `header.extensions` carries the log id (derived from `T`), a timestamp and the **prune flag**.
 - `header.seq_num` and `header.backlink` chain each author's operations into a log.
-- `body` is the application payload: a Loro update (a delta) or a Loro snapshot (with the prune
-  flag set).
+- `body` is the CBOR encoding of the application payload (a byte string as p2panda's streams
+  encode a `Vec<u8>` message): a Loro update (a delta) or a Loro snapshot (with the prune flag
+  set). Encoding it as p2panda does makes Logos and p2panda operations identical, so they can be
+  bridged (ADR 0007). Until 2026-11-07 the body was the raw payload.
 
 A receiver accepts an operation if:
 

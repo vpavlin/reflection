@@ -206,3 +206,117 @@ async fn other_documents_stay_separate() {
     alice.shutdown().await.unwrap();
     bob.shutdown().await.unwrap();
 }
+
+/// A p2panda node and a Logos node that never talk directly, joined by a bridge node.
+#[tokio::test(flavor = "multi_thread")]
+#[test_log::test]
+async fn bridge_joins_p2panda_and_logos() {
+    let topic = random_topic();
+
+    let on_p2panda = Node::with_p2panda(SigningKey::generate(), network(), None)
+        .await
+        .unwrap();
+    let bridge = Node::with_bridge(
+        SigningKey::generate(),
+        network(),
+        None,
+        Arc::new(MemoryBus::new()),
+    )
+    .await
+    .unwrap();
+    let on_logos = node(None).await;
+
+    let p2panda_doc = Recorder::default();
+    let logos_doc = Recorder::default();
+    let bridge_doc = Recorder::default();
+    let p2panda_stream = on_p2panda.stream(topic, p2panda_doc.clone()).await.unwrap();
+    let _bridge_stream = bridge.stream(topic, bridge_doc.clone()).await.unwrap();
+    let logos_stream = on_logos.stream(topic, logos_doc.clone()).await.unwrap();
+
+    p2panda_stream
+        .publish_delta(b"from p2panda".to_vec())
+        .await
+        .unwrap();
+    logos_stream
+        .publish_delta(b"from logos".to_vec())
+        .await
+        .unwrap();
+
+    let wait = |doc: Recorder, want: &'static [u8]| async move {
+        for _ in 0..1200 {
+            if doc.received().iter().any(|m| m == want) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    };
+    assert!(
+        wait(logos_doc.clone(), b"from p2panda").await,
+        "Logos side never got the p2panda edit"
+    );
+    assert!(
+        wait(p2panda_doc.clone(), b"from logos").await,
+        "p2panda side never got the Logos edit"
+    );
+    assert!(wait(bridge_doc.clone(), b"from logos").await);
+    assert!(wait(bridge_doc.clone(), b"from p2panda").await);
+
+    // Each side sees each operation once.
+    let count = |doc: &Recorder, want: &[u8]| doc.received().iter().filter(|m| *m == want).count();
+    assert_eq!(count(&logos_doc, b"from p2panda"), 1);
+    assert_eq!(count(&p2panda_doc, b"from logos"), 1);
+
+    on_p2panda.shutdown().await.unwrap();
+    bridge.shutdown().await.unwrap();
+    on_logos.shutdown().await.unwrap();
+}
+
+/// A Logos node that joins late catches up through the bridge, snapshot included.
+#[tokio::test(flavor = "multi_thread")]
+#[test_log::test]
+async fn late_logos_joiner_catches_up_through_bridge() {
+    let topic = random_topic();
+    let on_p2panda = Node::with_p2panda(SigningKey::generate(), network(), None)
+        .await
+        .unwrap();
+    let bridge = Node::with_bridge(
+        SigningKey::generate(),
+        network(),
+        None,
+        Arc::new(MemoryBus::new()),
+    )
+    .await
+    .unwrap();
+    let bridge_doc = Recorder::default();
+    let p2panda_stream = on_p2panda.stream(topic, Recorder::default()).await.unwrap();
+    let _bridge_stream = bridge.stream(topic, bridge_doc.clone()).await.unwrap();
+
+    p2panda_stream.publish_delta(b"old".to_vec()).await.unwrap();
+    p2panda_stream
+        .publish_snapshot(b"snapshot".to_vec())
+        .await
+        .unwrap();
+    // The bridge has it before anyone on Logos asks.
+    for _ in 0..1200 {
+        if bridge_doc.received().iter().any(|m| m == b"snapshot") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let late = node(None).await;
+    let late_doc = Recorder::default();
+    let _late_stream = late.stream(topic, late_doc.clone()).await.unwrap();
+    for _ in 0..1200 {
+        if late_doc.received().iter().any(|m| m == b"snapshot") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(late_doc.received(), vec![b"snapshot".to_vec()]);
+
+    on_p2panda.shutdown().await.unwrap();
+    bridge.shutdown().await.unwrap();
+    late.shutdown().await.unwrap();
+}

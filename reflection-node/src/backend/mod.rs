@@ -23,6 +23,8 @@ use crate::topic_stream::PublishError;
 use crate::traits::TopicSubscriptionError;
 
 #[cfg(feature = "logos")]
+pub(crate) mod bridge;
+#[cfg(feature = "logos")]
 pub(crate) mod logos;
 pub(crate) mod p2panda_backend;
 

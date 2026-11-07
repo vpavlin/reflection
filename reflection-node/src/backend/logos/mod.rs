@@ -82,6 +82,24 @@ impl Op {
         p2panda_core::validate_operation(&operation).is_ok()
     }
 
+    /// An operation created elsewhere (by p2panda, when bridging).
+    pub(crate) fn from_parts(header: Header, body: Option<Vec<u8>>) -> Self {
+        Self {
+            hash: header.hash(),
+            header_bytes: header.to_bytes(),
+            header,
+            body,
+        }
+    }
+
+    pub(crate) fn to_operation(&self) -> p2panda::operation::Operation {
+        p2panda::operation::Operation {
+            hash: self.hash,
+            header: self.header.clone(),
+            body: self.body.as_deref().map(Body::new),
+        }
+    }
+
     pub fn author(&self) -> VerifyingKey {
         self.header.verifying_key
     }
@@ -103,6 +121,7 @@ impl Op {
 }
 
 /// The Logos Delivery backend.
+#[derive(Clone)]
 pub(crate) struct LogosBackend {
     inner: Arc<Inner>,
 }
@@ -141,6 +160,74 @@ impl LogosBackend {
     }
 }
 
+/// What the bridge needs (see bridge.rs).
+impl LogosBackend {
+    /// Subscribe to a document and receive its whole operations: everything stored first, then
+    /// what arrives from Logos peers.
+    pub(crate) async fn subscribe_raw(
+        &self,
+        topic: Topic,
+    ) -> Result<mpsc::UnboundedReceiver<Op>, CreateStreamError> {
+        let state = self.inner.topic(topic).await?;
+        let (tx, rx) = mpsc::unbounded_channel();
+        {
+            let mut senders = state.senders.lock().await;
+            let ops = self
+                .inner
+                .store
+                .all(&topic)
+                .await
+                .map_err(|error| CreateStreamError(error.to_string()))?;
+            for op in ops {
+                let _ = tx.send(op);
+            }
+            senders.raw = Some(tx);
+        }
+        state.restart_heads();
+        Ok(rx)
+    }
+
+    /// Store an operation that came from the other network and send it to Logos peers.
+    /// Operations already known are ignored, which is what stops bridged operations from
+    /// going round in circles.
+    pub(crate) async fn relay(&self, topic: Topic, op: Op) {
+        let state = match self.inner.topic(topic).await {
+            Ok(state) => state,
+            Err(error) => {
+                error!("can't relay to Logos: {error}");
+                return;
+            }
+        };
+        match self.inner.store.has(&op.hash).await {
+            Ok(false) => {}
+            Ok(true) => return,
+            Err(error) => {
+                error!("can't read operation store: {error}");
+                return;
+            }
+        }
+        if !op.validate() {
+            warn!(hash = %op.hash, "not relaying an invalid operation");
+            return;
+        }
+        if let Err(error) = self.inner.store.insert(&topic, &op).await {
+            error!("can't store relayed operation: {error}");
+            return;
+        }
+        state.mark_seen(op.hash);
+        self.inner
+            .send(&state, &state.keys.ops_topic, &op.frame())
+            .await;
+    }
+
+    pub(crate) async fn ephemeral(
+        &self,
+        topic: Topic,
+    ) -> Result<EphemeralStream, CreateStreamError> {
+        self.ephemeral_stream(topic).await
+    }
+}
+
 impl SyncBackend for LogosBackend {
     fn stream(&self, topic: Topic) -> BoxFuture<'_, Result<OpStream, CreateStreamError>> {
         Box::pin(async move {
@@ -158,7 +245,9 @@ impl SyncBackend for LogosBackend {
                     .await
                     .map_err(|error| CreateStreamError(error.to_string()))?;
                 for op in ops {
-                    let _ = tx.send(op_event(&op)).await;
+                    if let Some(event) = op_event(&op) {
+                        let _ = tx.send(event).await;
+                    }
                 }
                 senders.ops = Some(tx);
             }
@@ -206,6 +295,8 @@ impl SyncBackend for LogosBackend {
 #[derive(Default)]
 struct Senders {
     ops: Option<mpsc::Sender<OpEvent>>,
+    /// Whole operations from Logos peers, for the bridge.
+    raw: Option<mpsc::UnboundedSender<Op>>,
     ephemeral: Option<mpsc::Sender<EphemeralEvent>>,
 }
 
@@ -342,6 +433,10 @@ impl Inner {
             .await
             .map_err(|error| PublishError::Backend(error.to_string()))?;
 
+        // Bodies are encoded the way p2panda's streams encode their messages, so operations are
+        // the same on both networks and can be bridged (see bridge.rs).
+        let body = p2panda_core::cbor::encode_cbor(&body)
+            .map_err(|error| PublishError::Backend(error.to_string()))?;
         let body_value = Body::new(&body);
         let mut header = Header {
             version: 1,
@@ -446,8 +541,12 @@ impl Inner {
             error!("can't store operation: {error}");
             return;
         }
-        if let Some(tx) = state.senders.lock().await.ops.as_ref() {
-            let _ = tx.send(op_event(&op)).await;
+        let senders = state.senders.lock().await;
+        if let Some(tx) = senders.raw.as_ref() {
+            let _ = tx.send(op.clone());
+        }
+        if let (Some(tx), Some(event)) = (senders.ops.as_ref(), op_event(&op)) {
+            let _ = tx.send(event).await;
         }
     }
 
@@ -570,12 +669,22 @@ impl Inner {
     }
 }
 
-fn op_event(op: &Op) -> OpEvent {
-    OpEvent::Operation {
+fn op_event(op: &Op) -> Option<OpEvent> {
+    let body = match op.body.as_deref() {
+        None => Vec::new(),
+        Some(bytes) => match p2panda_core::cbor::decode_cbor::<Vec<u8>, _>(bytes) {
+            Ok(body) => body,
+            Err(error) => {
+                warn!(hash = %op.hash, "dropping operation with undecodable body: {error}");
+                return None;
+            }
+        },
+    };
+    Some(OpEvent::Operation {
         id: op.hash,
         author: op.author(),
-        body: op.body.clone().unwrap_or_default(),
-    }
+        body,
+    })
 }
 
 fn repair_delay() -> Duration {

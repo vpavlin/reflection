@@ -15,7 +15,7 @@ use crate::traits::TopicSubscriptionError;
 
 #[derive(Debug)]
 pub(crate) struct P2pandaBackend {
-    node: p2panda::Node,
+    pub(crate) node: p2panda::Node,
 }
 
 impl P2pandaBackend {
@@ -38,56 +38,7 @@ impl SyncBackend for P2pandaBackend {
                 .stream_from::<Vec<u8>>(topic, StreamFrom::Start)
                 .await?;
 
-            let events = rx.filter_map(|event| match event {
-                StreamEvent::Processed { operation, .. } => Some(OpEvent::Operation {
-                    id: operation.id(),
-                    author: operation.author(),
-                    body: operation.message().to_owned(),
-                }),
-                StreamEvent::SyncStarted {
-                    remote_node_id,
-                    session_id,
-                    incoming_operations,
-                    outgoing_operations,
-                    incoming_bytes,
-                    outgoing_bytes,
-                    ..
-                } => Some(OpEvent::SyncStarted {
-                    remote: remote_node_id,
-                    session_id,
-                    incoming_operations,
-                    outgoing_operations,
-                    incoming_bytes,
-                    outgoing_bytes,
-                }),
-                StreamEvent::SyncEnded {
-                    remote_node_id,
-                    session_id,
-                    error,
-                    ..
-                } => Some(OpEvent::SyncEnded {
-                    remote: remote_node_id,
-                    session_id,
-                    error: error.map(|error| error.to_string()),
-                }),
-                StreamEvent::DecodeFailed { error, .. } => {
-                    Some(OpEvent::Error(TopicSubscriptionError::DecodeMessage(error)))
-                }
-                StreamEvent::ReplayFailed { error, .. } => {
-                    Some(OpEvent::Error(TopicSubscriptionError::ReplayStream(error)))
-                }
-                StreamEvent::ProcessingFailed { event, error, .. } => {
-                    tracing::error!(
-                        "error occurred while processing operation {}: {error}",
-                        event.header().hash()
-                    );
-                    Some(OpEvent::Error(error.into()))
-                }
-                StreamEvent::AckFailed { error, .. } => {
-                    Some(OpEvent::Error(TopicSubscriptionError::AckedMessage(error)))
-                }
-                _ => None,
-            });
+            let events = rx.filter_map(to_op_event);
 
             let publisher: Box<dyn OpPublisher> = Box::new(P2pandaOpPublisher(tx));
             Ok((publisher, Box::pin(events) as _))
@@ -125,7 +76,61 @@ impl SyncBackend for P2pandaBackend {
     }
 }
 
-struct P2pandaOpPublisher(StreamPublisher<Vec<u8>>);
+/// A p2panda stream event as the backend-neutral `OpEvent`.
+pub(crate) fn to_op_event(event: StreamEvent<Vec<u8>>) -> Option<OpEvent> {
+    match event {
+        StreamEvent::Processed { operation, .. } => Some(OpEvent::Operation {
+            id: operation.id(),
+            author: operation.author(),
+            body: operation.message().to_owned(),
+        }),
+        StreamEvent::SyncStarted {
+            remote_node_id,
+            session_id,
+            incoming_operations,
+            outgoing_operations,
+            incoming_bytes,
+            outgoing_bytes,
+            ..
+        } => Some(OpEvent::SyncStarted {
+            remote: remote_node_id,
+            session_id,
+            incoming_operations,
+            outgoing_operations,
+            incoming_bytes,
+            outgoing_bytes,
+        }),
+        StreamEvent::SyncEnded {
+            remote_node_id,
+            session_id,
+            error,
+            ..
+        } => Some(OpEvent::SyncEnded {
+            remote: remote_node_id,
+            session_id,
+            error: error.map(|error| error.to_string()),
+        }),
+        StreamEvent::DecodeFailed { error, .. } => {
+            Some(OpEvent::Error(TopicSubscriptionError::DecodeMessage(error)))
+        }
+        StreamEvent::ReplayFailed { error, .. } => {
+            Some(OpEvent::Error(TopicSubscriptionError::ReplayStream(error)))
+        }
+        StreamEvent::ProcessingFailed { event, error, .. } => {
+            tracing::error!(
+                "error occurred while processing operation {}: {error}",
+                event.header().hash()
+            );
+            Some(OpEvent::Error(error.into()))
+        }
+        StreamEvent::AckFailed { error, .. } => {
+            Some(OpEvent::Error(TopicSubscriptionError::AckedMessage(error)))
+        }
+        _ => None,
+    }
+}
+
+pub(crate) struct P2pandaOpPublisher(pub(crate) StreamPublisher<Vec<u8>>);
 
 impl OpPublisher for P2pandaOpPublisher {
     fn publish(&self, body: Vec<u8>) -> BoxFuture<'_, Result<(), PublishError>> {

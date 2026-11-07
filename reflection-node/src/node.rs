@@ -51,21 +51,35 @@ pub enum NodeError {
     Backend(String),
 }
 
-/// Which sync backend `Node::new` uses: `REFLECTION_BACKEND` = `p2panda` (default),
-/// `logos-memory` (Logos protocol over an in-process bus) or `logos` (Logos Delivery).
+/// Which sync backend `Node::new` uses, from `REFLECTION_BACKEND`:
+///
+/// - `p2panda` (default): p2panda over iroh;
+/// - `logos-memory` / `logos`: the Logos protocol over an in-process bus / Logos Delivery;
+/// - `bridge-memory` / `bridge`: both p2panda and Logos, relaying between them (bridge.rs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BackendChoice {
     P2panda,
     #[cfg(feature = "logos")]
     LogosMemory,
+    #[cfg(feature = "logos")]
+    BridgeMemory,
     #[cfg(feature = "logos-ffi")]
     Logos,
+    #[cfg(feature = "logos-ffi")]
+    Bridge,
 }
 
 #[cfg(feature = "logos")]
 type ExternalBus = Arc<dyn crate::logos::DeliveryBus>;
-#[cfg(not(feature = "logos"))]
-type ExternalBus = std::convert::Infallible;
+
+/// The transport of a node, when the caller decides instead of `REFLECTION_BACKEND`.
+pub(crate) enum Transport {
+    P2panda,
+    #[cfg(feature = "logos")]
+    Logos(ExternalBus),
+    #[cfg(feature = "logos")]
+    Bridge(ExternalBus),
+}
 
 /// Start a Logos Delivery node through liblogosdelivery, configured from the environment:
 /// `REFLECTION_LOGOS_LIB` (path to the library, required), `REFLECTION_LOGOS_CONFIG` (node
@@ -95,14 +109,38 @@ async fn logos_ffi_bus() -> Result<ExternalBus, NodeError> {
     Ok(Arc::new(bus))
 }
 
+async fn p2panda_backend(
+    signing_key: SigningKey,
+    network_id: NetworkId,
+    pool: sqlx::SqlitePool,
+) -> Result<P2pandaBackend, NodeError> {
+    let mut builder = p2panda::Node::builder()
+        .network_id(network_id)
+        .signing_key(signing_key)
+        .database_pool(pool);
+
+    // Don't connect to any servers during testing.
+    if cfg!(not(any(test, feature = "test_utils"))) {
+        builder = builder
+            .bootstrap(*BOOTSTRAP_NODE_ID, RELAY_URL.clone())
+            .relay_url(RELAY_URL.clone());
+    }
+
+    Ok(P2pandaBackend::new(builder.spawn().await?))
+}
+
 fn backend_choice() -> Result<BackendChoice, String> {
     let value = std::env::var("REFLECTION_BACKEND").unwrap_or_default();
     match value.as_str() {
         "" | "p2panda" => Ok(BackendChoice::P2panda),
         #[cfg(feature = "logos")]
         "logos-memory" => Ok(BackendChoice::LogosMemory),
+        #[cfg(feature = "logos")]
+        "bridge-memory" => Ok(BackendChoice::BridgeMemory),
         #[cfg(feature = "logos-ffi")]
         "logos" => Ok(BackendChoice::Logos),
+        #[cfg(feature = "logos-ffi")]
+        "bridge" => Ok(BackendChoice::Bridge),
         other => Err(format!(
             "REFLECTION_BACKEND={other} is not available in this build"
         )),
@@ -166,14 +204,54 @@ impl Node {
         db_location: Option<&Path>,
         bus: Arc<dyn crate::logos::DeliveryBus>,
     ) -> Result<Self, NodeError> {
-        Self::spawn(signing_key, network_id.into(), db_location, Some(bus)).await
+        Self::spawn(
+            signing_key,
+            network_id.into(),
+            db_location,
+            Some(Transport::Logos(bus)),
+        )
+        .await
+    }
+
+    /// Create a node on both p2panda and Logos Delivery (through the given bus) that relays
+    /// documents between the two networks, whatever `REFLECTION_BACKEND` says.
+    #[cfg(feature = "logos")]
+    pub async fn with_bridge(
+        signing_key: SigningKey,
+        network_id: impl Into<NetworkId>,
+        db_location: Option<&Path>,
+        bus: Arc<dyn crate::logos::DeliveryBus>,
+    ) -> Result<Self, NodeError> {
+        Self::spawn(
+            signing_key,
+            network_id.into(),
+            db_location,
+            Some(Transport::Bridge(bus)),
+        )
+        .await
+    }
+
+    /// Create a node on p2panda only, whatever `REFLECTION_BACKEND` says.
+    #[cfg(any(test, feature = "test_utils"))]
+    pub async fn with_p2panda(
+        signing_key: SigningKey,
+        network_id: impl Into<NetworkId>,
+        db_location: Option<&Path>,
+    ) -> Result<Self, NodeError> {
+        Self::spawn(
+            signing_key,
+            network_id.into(),
+            db_location,
+            Some(Transport::P2panda),
+        )
+        .await
     }
 
     async fn spawn(
         signing_key: SigningKey,
         network_id: NetworkId,
         db_location: Option<&Path>,
-        bus: Option<ExternalBus>,
+        transport: Option<Transport>,
     ) -> Result<Self, NodeError> {
         let runtime = if let Ok(handle) = tokio::runtime::Handle::try_current() {
             OwnedRuntimeOrHandle::Handle(handle)
@@ -189,7 +267,7 @@ impl Node {
             let db_file = db_location.map(|location| location.join(DATABASE_FILE));
 
             runtime
-                .spawn(NodeInner::new(signing_key, network_id, db_file, bus))
+                .spawn(NodeInner::new(signing_key, network_id, db_file, transport))
                 .await??
         };
 
@@ -297,7 +375,7 @@ impl NodeInner {
         signing_key: SigningKey,
         network_id: impl Into<NetworkId>,
         db_file: Option<PathBuf>,
-        bus: Option<ExternalBus>,
+        transport: Option<Transport>,
     ) -> Result<Self, NodeError> {
         let network_id = network_id.into();
         let verifying_key = signing_key.verifying_key();
@@ -307,53 +385,47 @@ impl NodeInner {
 
         let topic_store = TrackedTopicStore::from_pool(pool.clone());
 
-        #[cfg(feature = "logos")]
-        let bus = match (bus, backend_choice().map_err(NodeError::Backend)?) {
-            (Some(bus), _) => Some(bus),
-            (None, BackendChoice::LogosMemory) => {
-                Some(Arc::new(crate::logos::MemoryBus::new()) as ExternalBus)
-            }
-            #[cfg(feature = "logos-ffi")]
-            (None, BackendChoice::Logos) => Some(logos_ffi_bus().await?),
-            (None, BackendChoice::P2panda) => None,
-        };
-        #[cfg(not(feature = "logos"))]
-        let bus: Option<ExternalBus> = {
-            backend_choice().map_err(NodeError::Backend)?;
-            bus
+        let transport = match transport {
+            Some(transport) => transport,
+            None => match backend_choice().map_err(NodeError::Backend)? {
+                BackendChoice::P2panda => Transport::P2panda,
+                #[cfg(feature = "logos")]
+                BackendChoice::LogosMemory => {
+                    Transport::Logos(Arc::new(crate::logos::MemoryBus::new()))
+                }
+                #[cfg(feature = "logos")]
+                BackendChoice::BridgeMemory => {
+                    Transport::Bridge(Arc::new(crate::logos::MemoryBus::new()))
+                }
+                #[cfg(feature = "logos-ffi")]
+                BackendChoice::Logos => Transport::Logos(logos_ffi_bus().await?),
+                #[cfg(feature = "logos-ffi")]
+                BackendChoice::Bridge => Transport::Bridge(logos_ffi_bus().await?),
+            },
         };
 
-        let backend: Box<dyn SyncBackend> = match bus {
+        let backend: Box<dyn SyncBackend> = match transport {
+            Transport::P2panda => Box::new(p2panda_backend(signing_key, network_id, pool).await?),
             #[cfg(feature = "logos")]
-            Some(bus) => {
+            Transport::Logos(bus) => {
                 info!("syncing over Logos Delivery");
                 Box::new(
-                    crate::backend::logos::LogosBackend::new(
-                        bus,
-                        signing_key,
-                        network_id,
-                        pool.clone(),
-                    )
-                    .await?,
+                    crate::backend::logos::LogosBackend::new(bus, signing_key, network_id, pool)
+                        .await?,
                 )
             }
-            #[cfg(not(feature = "logos"))]
-            Some(never) => match never {},
-            None => {
-                let mut builder = p2panda::Node::builder()
-                    .network_id(network_id)
-                    .signing_key(signing_key)
-                    .database_pool(pool);
-
-                // Don't connect to any servers during testing.
-                if cfg!(not(any(test, feature = "test_utils"))) {
-                    builder = builder
-                        .bootstrap(*BOOTSTRAP_NODE_ID, RELAY_URL.clone())
-                        .relay_url(RELAY_URL.clone());
-                }
-
-                let node = builder.spawn().await?;
-                Box::new(P2pandaBackend::new(node))
+            #[cfg(feature = "logos")]
+            Transport::Bridge(bus) => {
+                info!("syncing over p2panda and Logos Delivery, bridging the two");
+                let logos = crate::backend::logos::LogosBackend::new(
+                    bus,
+                    signing_key.clone(),
+                    network_id,
+                    pool.clone(),
+                )
+                .await?;
+                let p2panda = p2panda_backend(signing_key, network_id, pool).await?;
+                Box::new(crate::backend::bridge::BridgeBackend::new(p2panda, logos))
             }
         };
 

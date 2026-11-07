@@ -35,6 +35,9 @@ cargo test --workspace --exclude reflection --all-features
 # Logos protocol over an in-process bus (also in CI)
 REFLECTION_BACKEND=logos-memory cargo test --workspace --exclude reflection --all-features
 
+# both, bridged (a p2panda network and a Logos network in one node)
+REFLECTION_BACKEND=bridge-memory cargo test --workspace --exclude reflection --all-features
+
 # real Logos Delivery nodes, peered on localhost within the test process
 L=/path/to/delivery_module   # holds liblogosdelivery.so (v0.39) and librln.so
 REFLECTION_BACKEND=logos REFLECTION_LOGOS_LIB=$L/liblogosdelivery.so LD_LIBRARY_PATH=$L \
@@ -59,6 +62,7 @@ joins the public Logos test network (`{"mode": "Core", "preset": "logos.test"}`)
 | [0003](adr/0003-broadcast-catch-up.md) | Replace two-party log sync with a broadcast "heads" catch-up over relay |
 | [0004](adr/0004-delivery-bus.md) | Talk to Logos Delivery through a tiny `DeliveryBus` trait: in-memory, liblogosdelivery (dlopen) and host adaptors |
 | [0005](adr/0005-backend-selection-and-tests.md) | Pick the backend with a cargo feature and an env var; run the unchanged tests on every backend |
+| [0007](adr/0007-bridge.md) | A bridge node relays documents between p2panda and Logos Delivery |
 | [0006](adr/0006-basecamp-app-split.md) | The Basecamp app lives in its own repo and depends on this fork |
 
 ## Status

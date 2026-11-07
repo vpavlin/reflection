@@ -61,6 +61,15 @@ jobs:
             --exclude ${{ env.EXCLUDE_PACKAGES }} \
             --all-features
 
+      - name: Run tests on the bridge (p2panda and Logos)
+        env:
+          REFLECTION_BACKEND: bridge-memory
+        run: |
+          cargo test \
+            --workspace \
+            --exclude ${{ env.EXCLUDE_PACKAGES }} \
+            --all-features
+
   check:
     runs-on: ubuntu-latest
 
