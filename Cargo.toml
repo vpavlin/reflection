@@ -1,3 +1,16 @@
 [workspace]
 resolver = "2"
 members = ["reflection-app", "reflection-doc", "reflection-node"]
+[patch.crates-io]
+# p2panda 0.7.0 + one commit: push imported operations to live sync sessions (the bridge needs
+# it, ADR 0007). Branch live-push-imports on vpavlin/p2panda; to be proposed upstream.
+p2panda = { git = "https://github.com/vpavlin/p2panda", rev = "dbbecdcd28904195db8802a79a28d1e71f341701" }
+p2panda-auth = { git = "https://github.com/vpavlin/p2panda", rev = "dbbecdcd28904195db8802a79a28d1e71f341701" }
+p2panda-core = { git = "https://github.com/vpavlin/p2panda", rev = "dbbecdcd28904195db8802a79a28d1e71f341701" }
+p2panda-discovery = { git = "https://github.com/vpavlin/p2panda", rev = "dbbecdcd28904195db8802a79a28d1e71f341701" }
+p2panda-encryption = { git = "https://github.com/vpavlin/p2panda", rev = "dbbecdcd28904195db8802a79a28d1e71f341701" }
+p2panda-net = { git = "https://github.com/vpavlin/p2panda", rev = "dbbecdcd28904195db8802a79a28d1e71f341701" }
+p2panda-spaces = { git = "https://github.com/vpavlin/p2panda", rev = "dbbecdcd28904195db8802a79a28d1e71f341701" }
+p2panda-store = { git = "https://github.com/vpavlin/p2panda", rev = "dbbecdcd28904195db8802a79a28d1e71f341701" }
+p2panda-stream = { git = "https://github.com/vpavlin/p2panda", rev = "dbbecdcd28904195db8802a79a28d1e71f341701" }
+p2panda-sync = { git = "https://github.com/vpavlin/p2panda", rev = "dbbecdcd28904195db8802a79a28d1e71f341701" }

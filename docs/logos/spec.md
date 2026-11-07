@@ -35,6 +35,10 @@ message = 0x01 || nonce (24 bytes) || XChaCha20-Poly1305(key, nonce, plaintext, 
 nonce   = blake3(key || plaintext)[0..24]
 ```
 
+On the wire, a message's payload is the **standard base64 text** of `message`, the convention of
+Loam (loam_core base64-decodes every payload it receives, and the Basecamp apps and phones all
+send through it). Receivers also accept a raw `message`, as sent before 2026-11-07.
+
 The nonce is deterministic. The same frame always seals to the same bytes, which relay
 de-duplication then drops, and no random number generator is needed. Different plaintexts get
 different nonces.

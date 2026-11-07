@@ -320,3 +320,57 @@ async fn late_logos_joiner_catches_up_through_bridge() {
     bridge.shutdown().await.unwrap();
     late.shutdown().await.unwrap();
 }
+
+/// Once a p2panda node and the bridge are in a live sync session, a Logos edit reaches the
+/// p2panda node right away, not at the next sync session (needs p2panda's import to push to
+/// live sessions, see the [patch] in Cargo.toml).
+#[tokio::test(flavor = "multi_thread")]
+#[test_log::test]
+async fn bridge_pushes_logos_edits_to_live_p2panda_peers() {
+    let topic = random_topic();
+    let on_p2panda = Node::with_p2panda(SigningKey::generate(), network(), None)
+        .await
+        .unwrap();
+    let bridge = Node::with_bridge(
+        SigningKey::generate(),
+        network(),
+        None,
+        Arc::new(MemoryBus::new()),
+    )
+    .await
+    .unwrap();
+    let on_logos = node(None).await;
+    let p2panda_doc = Recorder::default();
+    let logos_doc = Recorder::default();
+    let p2panda_stream = on_p2panda.stream(topic, p2panda_doc.clone()).await.unwrap();
+    let _bridge_stream = bridge.stream(topic, Recorder::default()).await.unwrap();
+    let logos_stream = on_logos.stream(topic, logos_doc.clone()).await.unwrap();
+
+    // Establish the session: the first edit crosses at whatever pace sync takes.
+    p2panda_stream
+        .publish_delta(b"first".to_vec())
+        .await
+        .unwrap();
+    for _ in 0..1200 {
+        if logos_doc.received().iter().any(|m| m == b"first") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(logos_doc.received().iter().any(|m| m == b"first"));
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Now a live edit from Logos.
+    logos_stream.publish_delta(b"live".to_vec()).await.unwrap();
+    let started = std::time::Instant::now();
+    while started.elapsed() < Duration::from_secs(15) {
+        if p2panda_doc.received().iter().any(|m| m == b"live") {
+            on_p2panda.shutdown().await.unwrap();
+            bridge.shutdown().await.unwrap();
+            on_logos.shutdown().await.unwrap();
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the live Logos edit did not reach the p2panda node within 15 s");
+}

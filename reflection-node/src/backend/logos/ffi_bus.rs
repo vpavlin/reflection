@@ -137,13 +137,46 @@ fn parse_received(bytes: &[u8]) -> Option<BusMessage> {
     }
     let message = event.get("message")?;
     let content_topic = message.get("contentTopic")?.as_str()?.to_owned();
-    let payload = base64::engine::general_purpose::STANDARD
+    let wire = base64::engine::general_purpose::STANDARD
         .decode(message.get("payload")?.as_str()?)
         .ok()?;
+    let payload = from_wire(wire);
     Some(BusMessage {
         content_topic,
         payload,
     })
+}
+
+/// Message payloads travel as the base64 text of the frame, as Loam sends them (loam_core, the
+/// shared transport of the Basecamp apps and phones, base64-decodes every payload it receives).
+/// See spec section 3.
+fn to_wire(frame: &[u8]) -> Vec<u8> {
+    base64::engine::general_purpose::STANDARD
+        .encode(frame)
+        .into_bytes()
+}
+
+/// The frame in a received payload: the base64 text Loam sends, or raw bytes from an older peer.
+fn from_wire(wire: Vec<u8>) -> Vec<u8> {
+    let looks_like_text = !wire.is_empty()
+        && wire
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'-' | b'_'));
+    if looks_like_text {
+        let text: String = wire
+            .iter()
+            .map(|&b| match b {
+                b'-' => '+',
+                b'_' => '/',
+                b => b as char,
+            })
+            .filter(|c| *c != '=')
+            .collect();
+        if let Ok(frame) = base64::engine::general_purpose::STANDARD_NO_PAD.decode(text) {
+            return frame;
+        }
+    }
+    wire
 }
 
 fn request(fields: &[(&str, &str)]) -> Vec<u8> {
@@ -316,7 +349,7 @@ impl DeliveryBus for LibLogosDeliveryBus {
         Box::pin(async move {
             let message = serde_json::json!({
                 "contentTopic": content_topic,
-                "payload": base64::engine::general_purpose::STANDARD.encode(&payload),
+                "payload": base64::engine::general_purpose::STANDARD.encode(to_wire(&payload)),
                 "ephemeral": false,
             })
             .to_string();
@@ -390,4 +423,20 @@ pub(crate) fn default_config() -> String {
         ]
     })
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wire_payloads_are_base64_text_and_raw_is_still_read() {
+        let frame: Vec<u8> = (0..=255u8).cycle().take(1000).collect();
+        let wire = to_wire(&frame);
+        assert!(wire.iter().all(u8::is_ascii));
+        assert_eq!(from_wire(wire), frame);
+        // A raw binary frame (version byte 0x01, then nonce...) is not base64 text.
+        let raw = vec![1u8, 200, 3, 0, 255, 17];
+        assert_eq!(from_wire(raw.clone()), raw);
+    }
 }

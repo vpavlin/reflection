@@ -41,3 +41,25 @@ CBOR (`encode_cbor(&message)`), while the Logos backend stored the raw bytes.
   makes the first one fail.
 - Presence across networks is not shown: someone on p2panda does not see someone on Logos as
   online, though they see each other's edits.
+
+## Notes from testing on the real networks (2026-11-07)
+
+Three processes: a plain p2panda Reflection (`reflection-doc/examples/note.rs`), a bridge (the
+same example with `REFLECTION_BACKEND=bridge`, liblogosdelivery v0.39 on the Logos test network)
+and the Basecamp app's `reflection_core` 0.1.1 in a headless Basecamp 0.3 session on loam_core.
+Two things had to change before edits crossed:
+
+1. **Loam's payload convention.** loam_core sends the base64 *text* of a frame as the message
+   payload and base64-decodes what it receives. The liblogosdelivery bus sent raw frames, so
+   neither side could open the other's messages. The bus now sends base64 text and reads both
+   (spec section 3). The Basecamp side needed no change.
+2. **Live push of imported operations (p2panda).** `StreamPublisher::publish()` pushes new
+   operations to peers in a live sync session; `import()` only stored them, so a Logos edit
+   reached already-connected p2panda peers only at their next sync session, which in practice
+   was "not within minutes". A one-commit patch to p2panda 0.7.0 pushes imported operations the
+   same way (`vpavlin/p2panda` branch `live-push-imports`, used through `[patch.crates-io]`). It
+   is a candidate for upstream. `bridge_pushes_logos_edits_to_live_p2panda_peers` fails without
+   it and passes with it.
+
+Result: a note created in Basecamp reached the p2panda node through the bridge, and live edits
+crossed in about 2 s from Basecamp to p2panda and under 1 s the other way.

@@ -28,5 +28,6 @@ thiserror = "2.0.18"
 tracing = "0.1"
 
 [dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 reflection-node = { path = "../reflection-node", features = ["test_utils"] }
 test-log = { version = "0.2.19", default-features = false, features = ["trace", "color"] }
