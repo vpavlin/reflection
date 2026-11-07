@@ -53,3 +53,21 @@ Adaptors:
   suppression) deterministically. The FFI bus tests real Logos Delivery.
 - Self-echo: relay delivers our own messages back. The bus reports them and
   the backend drops them by operation hash, the same as any duplicate.
+
+## Notes from implementation (2026-11-07)
+
+- The v0.39 C ABI (nim-ffi, `abi = cbor`) is not what the hand-written headers of older
+  releases show. The exported symbols take a CBOR request buffer: `create_node(req, len, cb,
+  ud)` and `<method>(ctx, cb, ud, req, len)`. Requests are CBOR maps keyed by the Nim parameter
+  names (`configJson`, `contentTopicStr`, `messageJson`, `nodeInfoId`), and replies are CBOR.
+  The `logosdelivery_ctx_*` functions in the generated header are inline C wrappers over these.
+  Events still arrive as JSON.
+- **The library must never be unloaded.** Its node threads keep calling back into it. The
+  first version dropped the `libloading::Library` with the bus and the next test crashed
+  (SIGSEGV, jump into unmapped code). The bus now loads the library once per process and leaks
+  it. Dropping a bus stops its node.
+- Several nodes in one process work. In test builds, each node dials the ones started before
+  it on 127.0.0.1 (`entry-node`), with discovery off. That plays the role p2panda's local
+  discovery plays in its tests.
+- Relay delivers our own messages back to us (self-echo). The backend drops them as known
+  operations or as its own ephemeral messages.

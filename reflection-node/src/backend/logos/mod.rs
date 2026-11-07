@@ -4,6 +4,8 @@
 //! encrypted on two content topics per document, and peers that missed operations catch up by
 //! broadcasting the heads of their logs (ADR 0003).
 mod bus;
+#[cfg(feature = "logos-ffi")]
+pub(crate) mod ffi_bus;
 mod store;
 mod wire;
 
@@ -15,6 +17,8 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub use bus::{BusError, BusMessage, DeliveryBus, MemoryBus};
+#[cfg(feature = "logos-ffi")]
+pub use ffi_bus::LibLogosDeliveryBus;
 
 use p2panda::node::CreateStreamError;
 use p2panda::operation::{Extensions, Header};

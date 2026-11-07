@@ -58,6 +58,8 @@ enum BackendChoice {
     P2panda,
     #[cfg(feature = "logos")]
     LogosMemory,
+    #[cfg(feature = "logos-ffi")]
+    Logos,
 }
 
 #[cfg(feature = "logos")]
@@ -65,12 +67,42 @@ type ExternalBus = Arc<dyn crate::logos::DeliveryBus>;
 #[cfg(not(feature = "logos"))]
 type ExternalBus = std::convert::Infallible;
 
+/// Start a Logos Delivery node through liblogosdelivery, configured from the environment:
+/// `REFLECTION_LOGOS_LIB` (path to the library, required), `REFLECTION_LOGOS_CONFIG` (node
+/// configuration JSON). Without a configuration, test builds peer only with other nodes of this
+/// process, and other builds join the public Logos test network.
+#[cfg(feature = "logos-ffi")]
+async fn logos_ffi_bus() -> Result<ExternalBus, NodeError> {
+    use crate::backend::logos::ffi_bus;
+
+    let library = std::env::var("REFLECTION_LOGOS_LIB").map_err(|_| {
+        NodeError::Backend("REFLECTION_BACKEND=logos needs REFLECTION_LOGOS_LIB".into())
+    })?;
+    let configured = std::env::var("REFLECTION_LOGOS_CONFIG").ok();
+    let local = configured.is_none() && cfg!(any(test, feature = "test_utils"));
+    let config = match configured {
+        Some(config) => config,
+        None if local => ffi_bus::local_config(),
+        None => ffi_bus::default_config(),
+    };
+
+    let bus = crate::logos::LibLogosDeliveryBus::new(std::path::Path::new(&library), &config)
+        .await
+        .map_err(|error| NodeError::Backend(error.to_string()))?;
+    if local {
+        ffi_bus::register_local(&bus).await;
+    }
+    Ok(Arc::new(bus))
+}
+
 fn backend_choice() -> Result<BackendChoice, String> {
     let value = std::env::var("REFLECTION_BACKEND").unwrap_or_default();
     match value.as_str() {
         "" | "p2panda" => Ok(BackendChoice::P2panda),
         #[cfg(feature = "logos")]
         "logos-memory" => Ok(BackendChoice::LogosMemory),
+        #[cfg(feature = "logos-ffi")]
+        "logos" => Ok(BackendChoice::Logos),
         other => Err(format!(
             "REFLECTION_BACKEND={other} is not available in this build"
         )),
@@ -281,6 +313,8 @@ impl NodeInner {
             (None, BackendChoice::LogosMemory) => {
                 Some(Arc::new(crate::logos::MemoryBus::new()) as ExternalBus)
             }
+            #[cfg(feature = "logos-ffi")]
+            (None, BackendChoice::Logos) => Some(logos_ffi_bus().await?),
             (None, BackendChoice::P2panda) => None,
         };
         #[cfg(not(feature = "logos"))]

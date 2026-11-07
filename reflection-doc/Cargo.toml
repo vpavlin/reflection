@@ -10,6 +10,7 @@ authors = [
 [features]
 # Sync over Logos Delivery, see docs/logos.
 logos = ["reflection-node/logos"]
+logos-ffi = ["reflection-node/logos-ffi"]
 
 [dependencies]
 anyhow = "1.0.101"

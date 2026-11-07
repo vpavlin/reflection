@@ -26,6 +26,25 @@ The goal is twofold:
 - **Upstream CI stays green.** CI runs `--all-features`, so the Logos feature
   must build and test with no native library installed. See [ADR 0004](adr/0004-delivery-bus.md).
 
+## Running the tests on each backend
+
+```sh
+# default: p2panda
+cargo test --workspace --exclude reflection --all-features
+
+# Logos protocol over an in-process bus (also in CI)
+REFLECTION_BACKEND=logos-memory cargo test --workspace --exclude reflection --all-features
+
+# real Logos Delivery nodes, peered on localhost within the test process
+L=/path/to/delivery_module   # holds liblogosdelivery.so (v0.39) and librln.so
+REFLECTION_BACKEND=logos REFLECTION_LOGOS_LIB=$L/liblogosdelivery.so LD_LIBRARY_PATH=$L \
+  cargo test --workspace --exclude reflection --all-features
+```
+
+To run the GTK app on Logos Delivery, build it with the `logos-ffi` feature and set
+`REFLECTION_BACKEND=logos` and `REFLECTION_LOGOS_LIB`. Without `REFLECTION_LOGOS_CONFIG` it
+joins the public Logos test network (`{"mode": "Core", "preset": "logos.test"}`).
+
 ## Spec
 
 - [spec.md](spec.md): the Logos wire protocol (content topics, envelopes,
@@ -49,7 +68,7 @@ The goal is twofold:
 | P0 | Baseline: upstream tests on the fork (6/6) | done |
 | P1 | `SyncBackend` abstraction, p2panda backend, 6/6 unchanged | done |
 | P2 | Logos backend + in-memory bus, 6/6 unchanged, plus 5 catch-up tests | done |
-| P3 | liblogosdelivery bus, 6/6 unchanged on a real Delivery node | planned |
+| P3 | liblogosdelivery bus, 6/6 unchanged on real Delivery nodes (v0.39.0) | done |
 | P4 | Upstream PR (abstraction first, Logos backend second) | planned |
 | P5 | `reflection-basecamp`: core module + QML view | planned |
 
