@@ -20,6 +20,12 @@ pub use node::{Node, NodeError, TrackedAuthor, TrackedTopic};
 pub use topic_stream::{PublishError, TopicStream, TopicStreamError};
 pub use traits::{TopicSubscription, TopicSubscriptionError};
 
+/// Sync over Logos Delivery, see `docs/logos`.
+#[cfg(feature = "logos")]
+pub mod logos {
+    pub use crate::backend::logos::{BusError, BusMessage, DeliveryBus, MemoryBus};
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

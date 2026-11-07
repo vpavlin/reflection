@@ -1,6 +1,6 @@
 # ADR 0002: p2panda operations as the Logos envelope and store
 
-Status: accepted (2026-11-07)
+Status: accepted (2026-11-07), amended the same day (see "Amendment")
 
 ## Context
 
@@ -51,3 +51,19 @@ The Logos backend reuses the p2panda data layer unchanged:
 - Coupling: we depend on p2panda's public data types staying stable. Both
   backends live in one crate and share one `Cargo.lock`, so a p2panda bump
   updates both together.
+
+## Amendment (2026-11-07): own table instead of p2panda's SqliteStore
+
+While implementing, I chose not to reuse `OperationForge` and `SqliteStore` for the Logos
+backend. The store's log API is generic over five type parameters and needs explicit
+transactions (`tx!`) for reads used before writes, and its ingest side (ordering, acks,
+pruning) lives in p2panda's crate-private pipeline. The few queries catch-up needs (heads,
+entries after a seq, prune) are simpler and easier to review as plain SQL.
+
+So the Logos backend keeps **the p2panda operation format** (header, signature, seq, backlink,
+prune flag; built and checked with `p2panda_core`) but stores operations in its own table,
+`logos_operations`, in the same SQLite database (spec section 5). The table is created by the
+backend on startup, not by a migration, so the p2panda backend's schema is untouched.
+
+Everything else above still holds: same identities, same signatures, and an operation is valid
+on either backend.

@@ -47,8 +47,8 @@ The goal is twofold:
 | Phase | What | State |
 |-------|------|-------|
 | P0 | Baseline: upstream tests on the fork (6/6) | done |
-| P1 | `SyncBackend` abstraction, p2panda backend, 6/6 unchanged | in progress |
-| P2 | Logos backend + in-memory bus, 6/6 unchanged | planned |
+| P1 | `SyncBackend` abstraction, p2panda backend, 6/6 unchanged | done |
+| P2 | Logos backend + in-memory bus, 6/6 unchanged, plus 5 catch-up tests | done |
 | P3 | liblogosdelivery bus, 6/6 unchanged on a real Delivery node | planned |
 | P4 | Upstream PR (abstraction first, Logos backend second) | planned |
 | P5 | `reflection-basecamp`: core module + QML view | planned |

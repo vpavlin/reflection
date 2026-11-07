@@ -46,6 +46,35 @@ pub enum NodeError {
 
     #[error(transparent)]
     NodeSpawn(#[from] SpawnError),
+
+    #[error("{0}")]
+    Backend(String),
+}
+
+/// Which sync backend `Node::new` uses: `REFLECTION_BACKEND` = `p2panda` (default),
+/// `logos-memory` (Logos protocol over an in-process bus) or `logos` (Logos Delivery).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackendChoice {
+    P2panda,
+    #[cfg(feature = "logos")]
+    LogosMemory,
+}
+
+#[cfg(feature = "logos")]
+type ExternalBus = Arc<dyn crate::logos::DeliveryBus>;
+#[cfg(not(feature = "logos"))]
+type ExternalBus = std::convert::Infallible;
+
+fn backend_choice() -> Result<BackendChoice, String> {
+    let value = std::env::var("REFLECTION_BACKEND").unwrap_or_default();
+    match value.as_str() {
+        "" | "p2panda" => Ok(BackendChoice::P2panda),
+        #[cfg(feature = "logos")]
+        "logos-memory" => Ok(BackendChoice::LogosMemory),
+        other => Err(format!(
+            "REFLECTION_BACKEND={other} is not available in this build"
+        )),
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
@@ -93,6 +122,27 @@ impl Node {
         network_id: impl Into<NetworkId>,
         db_location: Option<&Path>,
     ) -> Result<Self, NodeError> {
+        Self::spawn(signing_key, network_id.into(), db_location, None).await
+    }
+
+    /// Create a node that syncs over Logos Delivery through the given bus, whatever
+    /// `REFLECTION_BACKEND` says. Used by hosts that own the Delivery node (e.g. Logos Basecamp).
+    #[cfg(feature = "logos")]
+    pub async fn with_delivery_bus(
+        signing_key: SigningKey,
+        network_id: impl Into<NetworkId>,
+        db_location: Option<&Path>,
+        bus: Arc<dyn crate::logos::DeliveryBus>,
+    ) -> Result<Self, NodeError> {
+        Self::spawn(signing_key, network_id.into(), db_location, Some(bus)).await
+    }
+
+    async fn spawn(
+        signing_key: SigningKey,
+        network_id: NetworkId,
+        db_location: Option<&Path>,
+        bus: Option<ExternalBus>,
+    ) -> Result<Self, NodeError> {
         let runtime = if let Ok(handle) = tokio::runtime::Handle::try_current() {
             OwnedRuntimeOrHandle::Handle(handle)
         } else {
@@ -104,11 +154,10 @@ impl Node {
         };
 
         let inner = {
-            let network_id = network_id.into();
             let db_file = db_location.map(|location| location.join(DATABASE_FILE));
 
             runtime
-                .spawn(NodeInner::new(signing_key, network_id, db_file))
+                .spawn(NodeInner::new(signing_key, network_id, db_file, bus))
                 .await??
         };
 
@@ -216,7 +265,9 @@ impl NodeInner {
         signing_key: SigningKey,
         network_id: impl Into<NetworkId>,
         db_file: Option<PathBuf>,
+        bus: Option<ExternalBus>,
     ) -> Result<Self, NodeError> {
+        let network_id = network_id.into();
         let verifying_key = signing_key.verifying_key();
 
         let pool = database_pool(db_file).await?;
@@ -224,20 +275,53 @@ impl NodeInner {
 
         let topic_store = TrackedTopicStore::from_pool(pool.clone());
 
-        let mut builder = p2panda::Node::builder()
-            .network_id(network_id.into())
-            .signing_key(signing_key)
-            .database_pool(pool);
+        #[cfg(feature = "logos")]
+        let bus = match (bus, backend_choice().map_err(NodeError::Backend)?) {
+            (Some(bus), _) => Some(bus),
+            (None, BackendChoice::LogosMemory) => {
+                Some(Arc::new(crate::logos::MemoryBus::new()) as ExternalBus)
+            }
+            (None, BackendChoice::P2panda) => None,
+        };
+        #[cfg(not(feature = "logos"))]
+        let bus: Option<ExternalBus> = {
+            backend_choice().map_err(NodeError::Backend)?;
+            bus
+        };
 
-        // Don't connect to any servers during testing.
-        if cfg!(not(any(test, feature = "test_utils"))) {
-            builder = builder
-                .bootstrap(*BOOTSTRAP_NODE_ID, RELAY_URL.clone())
-                .relay_url(RELAY_URL.clone());
-        }
+        let backend: Box<dyn SyncBackend> = match bus {
+            #[cfg(feature = "logos")]
+            Some(bus) => {
+                info!("syncing over Logos Delivery");
+                Box::new(
+                    crate::backend::logos::LogosBackend::new(
+                        bus,
+                        signing_key,
+                        network_id,
+                        pool.clone(),
+                    )
+                    .await?,
+                )
+            }
+            #[cfg(not(feature = "logos"))]
+            Some(never) => match never {},
+            None => {
+                let mut builder = p2panda::Node::builder()
+                    .network_id(network_id)
+                    .signing_key(signing_key)
+                    .database_pool(pool);
 
-        let node = builder.spawn().await?;
-        let backend: Box<dyn SyncBackend> = Box::new(P2pandaBackend::new(node));
+                // Don't connect to any servers during testing.
+                if cfg!(not(any(test, feature = "test_utils"))) {
+                    builder = builder
+                        .bootstrap(*BOOTSTRAP_NODE_ID, RELAY_URL.clone())
+                        .relay_url(RELAY_URL.clone());
+                }
+
+                let node = builder.spawn().await?;
+                Box::new(P2pandaBackend::new(node))
+            }
+        };
 
         Ok(Self {
             backend,

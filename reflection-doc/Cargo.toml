@@ -7,6 +7,10 @@ authors = [
   "Julian Sparber <julian@sparber.net>"
 ]
 
+[features]
+# Sync over Logos Delivery, see docs/logos.
+logos = ["reflection-node/logos"]
+
 [dependencies]
 anyhow = "1.0.101"
 gio = "0.21"

@@ -22,6 +22,8 @@ use crate::node::{ConnectionMode, NodeError};
 use crate::topic_stream::PublishError;
 use crate::traits::TopicSubscriptionError;
 
+#[cfg(feature = "logos")]
+pub(crate) mod logos;
 pub(crate) mod p2panda_backend;
 
 pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;

@@ -33,6 +33,34 @@ jobs:
             --exclude ${{ env.EXCLUDE_PACKAGES }} \
             --all-features
 
+  # The same tests, unchanged, with the sync backend switched to the Logos Delivery protocol
+  # over an in-process bus (docs/logos, ADR 0005).
+  test-logos:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install glib
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglib2.0-dev pkg-config
+
+      - name: Setup Rust toolchain
+        uses: moonrepo/setup-rust@v1
+        with:
+          channel: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Run tests on the Logos backend
+        env:
+          REFLECTION_BACKEND: logos-memory
+        run: |
+          cargo test \
+            --workspace \
+            --exclude ${{ env.EXCLUDE_PACKAGES }} \
+            --all-features
+
   check:
     runs-on: ubuntu-latest
 
