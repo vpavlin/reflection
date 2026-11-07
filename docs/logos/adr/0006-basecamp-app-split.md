@@ -1,6 +1,6 @@
 # ADR 0006: The Basecamp app is a separate repo on top of this fork
 
-Status: accepted (2026-11-07)
+Status: accepted (2026-11-07), amended the same day (see "Amendment")
 
 ## Context
 
@@ -43,3 +43,24 @@ is never shared.
   Reflection on the Logos backend and the Basecamp app edit the same note.
 - glib must be bundled for darwin and linux-arm64 Basecamp variants. That is
   part of the module build, not the fork.
+
+## Amendment (2026-11-07): a Rust core module, no glib, transport via loam_core
+
+Three findings change the "how" (the repo split stands):
+
+1. **logos-module-builder 0.3.1+ builds core modules written in Rust** (`interface: "cdylib"`,
+   `codegen.rust`). The crate is the module: the builder derives the contract from a Rust trait,
+   generates typed clients for dependencies (`modules().<dep>`, sync, async and events as an
+   iterator), and links the staticlib. No C++ layer and no hand-written C ABI are needed.
+2. **`reflection-doc` is not needed in Basecamp.** It is a GObject layer. Its wire behaviour is
+   small: one Loro text container, local updates published as deltas, a debounced Loro
+   snapshot published as a prune, and remote bytes imported. Cursors are postcard-encoded Loro
+   cursors. The core module re-implements exactly that on `reflection-node` and the same `loro`
+   version, so no glib is linked into Basecamp (which also keeps macOS and arm64 builds simple).
+   Wire compatibility with the GTK app is checked by a test that runs `reflection-doc` and the
+   Basecamp document layer against each other over the Logos protocol.
+3. **The host bus goes through `loam_core`, not `delivery_module`.** A Basecamp host has one
+   `delivery_module`, and its node belongs to whichever module created it (for our apps that
+   is `loam_core`, the shared transport). `reflection_core` therefore depends on `loam_core`:
+   `join(topic)` subscribes, `sendSealed(topic, base64)` publishes, and the `received` event
+   delivers. It shares the node with Scala and the other apps, and later with phones.
