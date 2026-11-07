@@ -5,11 +5,11 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use p2panda::VerifyingKey;
-use p2panda::streams::EphemeralStreamPublisher;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
 use tracing::{error, warn};
 
+use crate::backend::EphemeralPublisher;
 use crate::ephemeral_message::EphemeralMessage;
 use crate::node::NodeInner;
 use crate::traits::TopicSubscription;
@@ -38,7 +38,7 @@ pub struct AuthorTracker<T> {
     last_ping: Mutex<HashMap<VerifyingKey, Instant>>,
     subscribable_topic: Arc<T>,
     node: Arc<NodeInner>,
-    tx: RwLock<Option<EphemeralStreamPublisher<EphemeralMessage>>>,
+    tx: RwLock<Option<Arc<dyn EphemeralPublisher>>>,
 }
 
 impl<T: TopicSubscription> AuthorTracker<T> {
@@ -51,7 +51,7 @@ impl<T: TopicSubscription> AuthorTracker<T> {
         })
     }
 
-    pub async fn set_topic_tx(&self, tx: Option<EphemeralStreamPublisher<EphemeralMessage>>) {
+    pub async fn set_topic_tx(&self, tx: Option<Arc<dyn EphemeralPublisher>>) {
         let mut tx_guard = self.tx.write().await;
 
         // Send good bye message to the network
@@ -167,10 +167,7 @@ impl<T: TopicSubscription> AuthorTracker<T> {
     }
 }
 
-async fn send_message(
-    tx: &EphemeralStreamPublisher<EphemeralMessage>,
-    message: AuthorTrackerMessage,
-) {
+async fn send_message(tx: &Arc<dyn EphemeralPublisher>, message: AuthorTrackerMessage) {
     if let Err(err) = tx.publish(EphemeralMessage::AuthorTracker(message)).await {
         warn!("error occurred when sending ephemeral message: {err}");
     }

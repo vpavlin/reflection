@@ -6,6 +6,7 @@
 //!   currently online.
 //! - Persisted Topics: Store to persist all previously used topics.
 mod author_tracker;
+mod backend;
 mod database;
 mod ephemeral_message;
 mod node;

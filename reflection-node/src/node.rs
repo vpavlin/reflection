@@ -5,9 +5,11 @@ use chrono::{DateTime, Utc};
 use p2panda::node::SpawnError;
 use p2panda::{NetworkId, RelayUrl, SigningKey, VerifyingKey};
 use thiserror::Error;
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::Notify;
 use tracing::info;
 
+use crate::backend::SyncBackend;
+use crate::backend::p2panda_backend::P2pandaBackend;
 use crate::database::{database_pool, run_migrations};
 pub use crate::topic_store::TrackedAuthor;
 use crate::topic_store::{TopicRow, TrackedTopicStore};
@@ -203,7 +205,7 @@ impl Node {
 
 #[derive(Debug)]
 pub(crate) struct NodeInner {
-    pub(crate) network: RwLock<p2panda::Node>,
+    pub(crate) backend: Box<dyn SyncBackend>,
     pub(crate) shutdown_notifier: Notify,
     pub(crate) topic_store: TrackedTopicStore,
     pub(crate) verifying_key: VerifyingKey,
@@ -235,9 +237,10 @@ impl NodeInner {
         }
 
         let node = builder.spawn().await?;
+        let backend: Box<dyn SyncBackend> = Box::new(P2pandaBackend::new(node));
 
         Ok(Self {
-            network: RwLock::new(node),
+            backend,
             shutdown_notifier: Notify::new(),
             topic_store,
             verifying_key,
@@ -246,11 +249,9 @@ impl NodeInner {
 
     pub async fn set_connection_mode(
         &self,
-        _connection_mode: ConnectionMode,
+        connection_mode: ConnectionMode,
     ) -> Result<(), NodeError> {
-        // TODO: This is a no-op currently and requires work in `p2panda-net` upstream.
-        // See related issue: https://github.com/p2panda/p2panda/issues/1093
-        Ok(())
+        self.backend.set_connection_mode(connection_mode).await
     }
 
     pub async fn shutdown(&self) {

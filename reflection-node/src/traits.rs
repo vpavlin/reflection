@@ -28,6 +28,10 @@ pub enum TopicSubscriptionError {
     /// Operation failed during event processing of the system-level pipeline.
     #[error(transparent)]
     StreamProcessor(#[from] ProcessorError),
+
+    /// Error reported by a sync backend other than p2panda.
+    #[error("{0}")]
+    Backend(String),
 }
 
 pub trait TopicSubscription: Sync + Send {

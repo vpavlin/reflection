@@ -1,11 +1,10 @@
 use std::mem::take;
-use std::ops::{Deref, DerefMut};
+use std::ops::DerefMut;
 use std::sync::Arc;
 
 use chrono::Utc;
 use p2panda::Topic;
 use p2panda::node::CreateStreamError;
-use p2panda::streams::{EphemeralStreamPublisher, StreamEvent, StreamFrom, StreamPublisher};
 use thiserror::Error;
 use tokio::sync::{RwLock, oneshot};
 use tokio::task::{AbortHandle, JoinError};
@@ -13,6 +12,7 @@ use tokio_stream::StreamExt;
 use tracing::{error, info, warn};
 
 use crate::author_tracker::AuthorTracker;
+use crate::backend::{EphemeralPublisher, OpEvent, OpPublisher};
 use crate::ephemeral_message::EphemeralMessage;
 use crate::node::NodeInner;
 use crate::traits::TopicSubscription;
@@ -30,6 +30,9 @@ pub enum PublishError {
 
     #[error("streams to publish data into network are not available due to a setup error")]
     BrokenStream,
+
+    #[error("backend failed to publish: {0}")]
+    Backend(String),
 }
 
 #[derive(Debug, Error)]
@@ -126,8 +129,8 @@ where
 }
 
 pub(crate) struct TopicStreamInner<T> {
-    tx: RwLock<Option<StreamPublisher<Vec<u8>>>>,
-    ephemeral_tx: RwLock<Option<EphemeralStreamPublisher<EphemeralMessage>>>,
+    tx: RwLock<Option<Box<dyn OpPublisher>>>,
+    ephemeral_tx: RwLock<Option<Arc<dyn EphemeralPublisher>>>,
     node: Arc<NodeInner>,
     topic: Topic,
     subscription: Arc<T>,
@@ -162,12 +165,8 @@ where
     }
 
     pub async fn spawn_network_monitor(&self, ready_signal: oneshot::Sender<()>) {
-        // Hold a read lock to the network, so that the network won't be dropped or shutdown.
-        let network_guard = self.node.network.read().await;
-
         let result = setup_streams(
             &self.node,
-            network_guard.deref(),
             self.topic,
             &self.subscription,
             &self.author_tracker,
@@ -184,8 +183,6 @@ where
                 self.subscription.error(error.into());
             }
         }
-
-        drop(network_guard);
 
         // Inform caller that we're done with setting up the streams. They are ready now to be used
         // for publishing and receiving messages.
@@ -241,7 +238,7 @@ where
 
             // Append an operation to our log and set the prune flag to true. This will remove
             // previous entries.
-            tx.prune(Some(data)).await?;
+            tx.prune(data).await?;
         } else {
             return Err(PublishError::BrokenStream);
         }
@@ -273,14 +270,13 @@ where
 
 async fn setup_streams<T>(
     node: &Arc<NodeInner>,
-    network: &p2panda::Node,
     id: Topic,
     subscribable_topic: &Arc<T>,
     author_tracker: &Arc<AuthorTracker<T>>,
 ) -> Result<
     (
-        StreamPublisher<Vec<u8>>,
-        EphemeralStreamPublisher<EphemeralMessage>,
+        Box<dyn OpPublisher>,
+        Arc<dyn EphemeralPublisher>,
         Vec<AbortHandle>,
     ),
     CreateStreamError,
@@ -293,28 +289,19 @@ where
     // 1. Handle incoming operations from eventually consistent topic stream.
     // ======================================================================
 
-    // Always start from re-playing _all_ operations in the beginning. This is due to Reflection not
-    // keeping materialised document state around and we need to repeat materialising the document
-    // at the beginning (in memory).
-    //
-    // This cost is acceptable since we're frequently pruning the log and the number of operations
-    // to process is rather small.
-    let stream_from = StreamFrom::Start;
-
-    let (topic_tx, mut topic_rx) = network.stream_from::<Vec<u8>>(id, stream_from).await?;
+    // The backend re-plays _all_ operations in the beginning, see `SyncBackend::stream`.
+    let (topic_tx, mut topic_rx) = node.backend.stream(id).await?;
 
     let node_clone = node.clone();
     let subscribable_topic_clone = subscribable_topic.clone();
     let abort_handle = tokio::spawn(async move {
         while let Some(event) = topic_rx.next().await {
             match event {
-                StreamEvent::Processed { operation, .. } => {
-                    let author = operation.author();
-
+                OpEvent::Operation { id: operation_id, author, body } => {
                     info!(
                         author = &author.to_string()[0..8],
                         "processed operation with id {}",
-                        operation.id()
+                        operation_id
                     );
 
                     // When we discover a new author we need to add them to our topic store.
@@ -323,20 +310,19 @@ where
                     }
 
                     // Forward the message payload up to the app layer.
-                    subscribable_topic_clone.bytes_received(author, operation.message().to_owned());
+                    subscribable_topic_clone.bytes_received(author, body);
                 }
-                StreamEvent::SyncStarted {
-                    remote_node_id,
+                OpEvent::SyncStarted {
+                    remote,
                     session_id,
                     incoming_operations,
                     outgoing_operations,
                     incoming_bytes,
                     outgoing_bytes,
-                    ..
                 } => {
                     info!(
                         %session_id,
-                        remote_node_id = &remote_node_id.to_string()[0..8],
+                        remote_node_id = &remote.to_string()[0..8],
                         "sync started w. {} incoming ({} bytes) and {} outgoing operations ({} bytes)",
                         incoming_operations,
                         incoming_bytes,
@@ -344,46 +330,30 @@ where
                         outgoing_bytes,
                     );
                 }
-                StreamEvent::SyncEnded {
-                    remote_node_id,
+                OpEvent::SyncEnded {
+                    remote,
                     session_id,
                     error,
-                    ..
-                } => {
-                    match error {
-                        Some(error) => {
-                            warn!(
-                                %session_id,
-                                remote_node_id = &remote_node_id.to_string()[0..8],
-                                "sync failed with error {error}",
-                            );
-                        }
-                        None => {
-                            info!(
-                                %session_id,
-                                remote_node_id = &remote_node_id.to_string()[0..8],
-                                "sync ended",
-                            );
-                        },
+                } => match error {
+                    Some(error) => {
+                        warn!(
+                            %session_id,
+                            remote_node_id = &remote.to_string()[0..8],
+                            "sync failed with error {error}",
+                        );
                     }
+                    None => {
+                        info!(
+                            %session_id,
+                            remote_node_id = &remote.to_string()[0..8],
+                            "sync ended",
+                        );
+                    }
+                },
+                OpEvent::Error(error) => {
+                    error!("error occurred in operation stream: {error}");
+                    subscribable_topic_clone.error(error);
                 }
-                StreamEvent::DecodeFailed { error, .. } => {
-                    error!("failed decoding incoming operation from stream: {error}");
-                    subscribable_topic_clone.error(error.into());
-                }
-                StreamEvent::ReplayFailed { error, .. } => {
-                    error!("error occurred while replaying operation stream: {error}");
-                    subscribable_topic_clone.error(crate::traits::TopicSubscriptionError::ReplayStream(error));
-                }
-                StreamEvent::ProcessingFailed { event, error, .. } => {
-                    error!("error occurred while processing operation {}: {error}", event.header().hash());
-                    subscribable_topic_clone.error(error.into());
-                }
-                StreamEvent::AckFailed { error, .. } => {
-                    error!("error occurred while acking event: {error}");
-                    subscribable_topic_clone.error(crate::traits::TopicSubscriptionError::AckedMessage(error));
-                }
-                _ => (),
             }
         }
     })
@@ -394,7 +364,8 @@ where
     // 2. Handle incoming messages from ephemeral topic stream.
     // ========================================================
 
-    let (ephemeral_tx, mut ephemeral_rx) = network.ephemeral_stream::<EphemeralMessage>(id).await?;
+    let (ephemeral_tx, mut ephemeral_rx) = node.backend.ephemeral_stream(id).await?;
+    let ephemeral_tx: Arc<dyn EphemeralPublisher> = Arc::from(ephemeral_tx);
 
     author_tracker
         .set_topic_tx(Some(ephemeral_tx.clone()))
@@ -403,19 +374,17 @@ where
     let author_tracker_clone = author_tracker.clone();
     let subscribable_topic_clone = subscribable_topic.clone();
     let abort_handle = tokio::spawn(async move {
-        while let Some(message) = ephemeral_rx.next().await {
-            match message.body() {
+        while let Some(event) = ephemeral_rx.next().await {
+            match event.message {
                 EphemeralMessage::Application(bytes) => {
                     subscribable_topic_clone.ephemeral_bytes_received(
-                        message.author(),
-                        message.timestamp(),
-                        bytes.to_owned(),
+                        event.author,
+                        event.timestamp,
+                        bytes,
                     );
                 }
                 EphemeralMessage::AuthorTracker(tracker) => {
-                    author_tracker_clone
-                        .received(message.author(), tracker.to_owned())
-                        .await;
+                    author_tracker_clone.received(event.author, tracker).await;
                 }
             }
         }
@@ -443,8 +412,8 @@ where
 async fn teardown_streams<T>(
     topic: &Topic,
     author_tracker: &Arc<AuthorTracker<T>>,
-    tx: Option<StreamPublisher<Vec<u8>>>,
-    ephemeral_tx: Option<EphemeralStreamPublisher<EphemeralMessage>>,
+    tx: Option<Box<dyn OpPublisher>>,
+    ephemeral_tx: Option<Arc<dyn EphemeralPublisher>>,
     abort_handles: Vec<AbortHandle>,
 ) where
     T: TopicSubscription + 'static,
