@@ -70,7 +70,7 @@ joins the public Logos test network (`{"mode": "Core", "preset": "logos.test"}`)
 | P2 | Logos backend + in-memory bus, 6/6 unchanged, plus 5 catch-up tests | done |
 | P3 | liblogosdelivery bus, 6/6 unchanged on real Delivery nodes (v0.39.0) | done |
 | P4 | Upstream PR (abstraction first, Logos backend second) | planned |
-| P5 | `reflection-basecamp`: core module + QML view | planned |
+| P5 | [`reflection-basecamp`](https://github.com/vpavlin/reflection-basecamp): Rust core module on loam_core + QML view; two headless Basecamp nodes sync on the Logos test network | done (0.1.0 on lan03) |
 
 ## Upstream context
 
