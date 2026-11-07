@@ -25,6 +25,10 @@ pub(crate) enum Frame {
     Heads {
         from: VerifyingKey,
         heads: Vec<(VerifyingKey, u64, Hash)>,
+        /// Makes every heads message unique on the wire. Transports that drop repeated
+        /// payloads (Loam dedups by frame hash) would otherwise swallow a re-sent heads.
+        #[serde(default)]
+        nonce: u64,
     },
 
     /// A signed ephemeral message (presence, cursors).

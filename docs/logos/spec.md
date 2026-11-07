@@ -48,7 +48,7 @@ CBOR, serde externally-tagged enum. Byte fields are CBOR byte strings.
 
 ```
 { "op":    { "header": bytes, "body": bytes | null } }
-{ "heads": { "from": verifying_key, "heads": [ [author, seq, hash], ... ] } }
+{ "heads": { "from": verifying_key, "heads": [ [author, seq, hash], ... ], "nonce": u64 } }
 { "eph":   { "author": verifying_key, "timestamp": u64, "body": bytes, "signature": sig } }
 ```
 
@@ -96,6 +96,10 @@ A receiver compares with its own logs:
 - **We lack something**: it sends its own heads, so whoever has the data repairs.
 
 `heads` from oneself (`from` = own key) are ignored.
+
+`nonce` (the send time in nanoseconds) makes each heads message unique. A transport that drops
+repeated payloads, as Loam does (it dedups by frame hash), would otherwise drop a re-sent heads
+whose content has not changed, and with it the request for a repair.
 
 ### 4.3 `eph`: ephemeral messages
 

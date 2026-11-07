@@ -26,7 +26,8 @@ use crate::traits::TopicSubscriptionError;
 pub(crate) mod logos;
 pub(crate) mod p2panda_backend;
 
-pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+/// A boxed, sendable future, used by the backend traits.
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub(crate) type BoxStream<T> = Pin<Box<dyn Stream<Item = T> + Send + 'static>>;
 
 /// Events from the eventually consistent operation stream of a topic.

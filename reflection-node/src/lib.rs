@@ -23,6 +23,7 @@ pub use traits::{TopicSubscription, TopicSubscriptionError};
 /// Sync over Logos Delivery, see `docs/logos`.
 #[cfg(feature = "logos")]
 pub mod logos {
+    pub use crate::backend::BoxFuture;
     #[cfg(feature = "logos-ffi")]
     pub use crate::backend::logos::LibLogosDeliveryBus;
     pub use crate::backend::logos::{BusError, BusMessage, DeliveryBus, MemoryBus};

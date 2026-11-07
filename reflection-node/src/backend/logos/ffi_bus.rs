@@ -363,7 +363,31 @@ pub(crate) async fn register_local(bus: &LibLogosDeliveryBus) {
     }
 }
 
-/// Configuration for the public Logos test network.
+/// Configuration for the public Logos test network, with RLN off.
+///
+/// The same node configuration loam_core uses by default (a mirror of logos-delivery v0.39's
+/// `LogosTestConf`), so a GTK Reflection and a Basecamp one on loam_core meet on one network.
+/// With `preset: "logos.test"` RLN is on, and without a membership every send fails.
 pub(crate) fn default_config() -> String {
-    serde_json::json!({ "mode": "Core", "preset": "logos.test" }).to_string()
+    serde_json::json!({
+        "mode": "Core",
+        "preset": "",
+        "clusterId": 2,
+        "numShardsInNetwork": 8,
+        "maxMessageSize": "150KiB",
+        "tcpPort": 0,
+        "discv5UdpPort": 0,
+        "discv5Discovery": true,
+        "enableKadDiscovery": true,
+        "reliabilityEnabled": true,
+        "entryNodes": [
+            "/dns4/node-01.do-ams3.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmQ9X2xDfPG3uL77V9piYDhjq14JhKCtcmNYsTMKNqrKCj",
+            "/dns4/node-02.do-ams3.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmB8NYprrfQrgWVzsJtYWkfjsXbmJEGNMG6othXsQ53BwG",
+            "/dns4/node-01.gc-us-central1-a.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmF8WtwGPmeGHgYAX2277jHgy5cW9F7zsB8EqUjBZQAZQ3",
+            "/dns4/node-02.gc-us-central1-a.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmUuXhUW9bdJpzN1kfDziFiUZo4bszTk66cvr7uuyCHXR7",
+            "/dns4/node-01.ac-cn-hongkong-c.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmL3oU95jh1BZHozn3uNhx8HEneirgr8M1jEAapzXGDqRF",
+            "/dns4/node-02.ac-cn-hongkong-c.logos.test.status.im/tcp/30303/p2p/16Uiu2HAm28CoBZjpyxsanC8tQpbvZ7bZJnVYuB1EgFzb571qpWsV"
+        ]
+    })
+    .to_string()
 }

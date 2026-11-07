@@ -307,6 +307,10 @@ impl Inner {
                 .iter()
                 .map(|op| (op.author(), op.seq(), op.hash))
                 .collect(),
+            nonce: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0),
         };
         self.send(state, &state.keys.ops_topic, &frame).await;
     }
@@ -615,7 +619,7 @@ async fn receive_loop(
                     None => warn!("dropping undecodable operation"),
                 }
             }
-            Frame::Heads { from, heads } => inner.receive_heads(&state, from, heads).await,
+            Frame::Heads { from, heads, .. } => inner.receive_heads(&state, from, heads).await,
             Frame::Ephemeral(message) => inner.receive_ephemeral(&state, message).await,
         }
     }
