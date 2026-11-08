@@ -921,13 +921,14 @@ async fn receive_loop(
             Frame::Operation { header, body } => {
                 match Op::decode(header.0, body.map(|body| body.0)) {
                     Some(op) => {
-                        let kind = if op.prunes() {
-                            Kind::Snapshot
-                        } else {
-                            Kind::Op
-                        };
-                        inner.count_received(&state, kind, bytes);
+                        // Our own operations come back from the relay: not counted.
                         if op.author() != inner.signing_key.verifying_key() {
+                            let kind = if op.prunes() {
+                                Kind::Snapshot
+                            } else {
+                                Kind::Op
+                            };
+                            inner.count_received(&state, kind, bytes);
                             state.heard_from(op.author());
                         }
                         inner.receive_op(&state, op).await
