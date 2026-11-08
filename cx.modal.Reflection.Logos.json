@@ -58,7 +58,7 @@
         "no-debuginfo": true
       },
       "build-commands": [
-        "install -Dm755 -t /app/lib/logos liblogosdelivery.so librln.so libgomp.so.1"
+        "install -Dm755 -t /app/lib/logos *.so*"
       ],
       "sources": [
         {
@@ -66,10 +66,10 @@
           "only-arches": [
             "x86_64"
           ],
-          "url": "https://data.vpavlin.xyz/reflection/logos-delivery/logos-delivery-0.3.0-x86_64.tar.gz",
-          "sha256": "fdcd17b5b8801cff77eddfede409b768fd5671771a32834a746b2411c8ec63c9",
+          "url": "https://data.vpavlin.xyz/reflection/logos-delivery/logos-delivery-0.3.0-2-x86_64.tar.gz",
+          "sha256": "1af3f2296769607d64526d4a393d68e121a2580db7b14447f6b54516c6269395",
           "mirror-urls": [
-            "https://github.com/vpavlin/reflection/releases/download/logos-delivery-0.3.0/logos-delivery-0.3.0-x86_64.tar.gz"
+            "https://github.com/vpavlin/reflection/releases/download/logos-delivery-0.3.0/logos-delivery-0.3.0-2-x86_64.tar.gz"
           ]
         },
         {
@@ -77,10 +77,10 @@
           "only-arches": [
             "aarch64"
           ],
-          "url": "https://data.vpavlin.xyz/reflection/logos-delivery/logos-delivery-0.3.0-aarch64.tar.gz",
-          "sha256": "b2e9dfec5e5f77df9d8fd2b30f37651244edab737025b929a27730cb33bcd550",
+          "url": "https://data.vpavlin.xyz/reflection/logos-delivery/logos-delivery-0.3.0-2-aarch64.tar.gz",
+          "sha256": "632a364ab291010f5eb34e5da933f119baa91d4c48bf9f493b5beca183ba5184",
           "mirror-urls": [
-            "https://github.com/vpavlin/reflection/releases/download/logos-delivery-0.3.0/logos-delivery-0.3.0-aarch64.tar.gz"
+            "https://github.com/vpavlin/reflection/releases/download/logos-delivery-0.3.0/logos-delivery-0.3.0-2-aarch64.tar.gz"
           ]
         }
       ]
