@@ -129,6 +129,10 @@ impl SyncBackend for BridgeBackend {
     fn stats(&self) -> Option<TransportStats> {
         self.logos.stats()
     }
+
+    fn set_message_budget(&self, budget: Option<u64>) {
+        self.logos.set_message_budget(budget);
+    }
 }
 
 /// Relay p2panda operations to Logos, collecting each author's for `RELAY_WINDOW`.

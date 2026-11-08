@@ -126,6 +126,12 @@ pub(crate) trait SyncBackend: Send + Sync + std::fmt::Debug + 'static {
     fn stats(&self) -> Option<TransportStats> {
         None
     }
+
+    /// Pretend the network allows at most this many messages per epoch (RLN), for trying out
+    /// rate tiers: once they are used up, further messages are not sent but counted as
+    /// `blocked`, as RLN would drop them. `None`: no limit. Backends that don't pay per message
+    /// ignore it.
+    fn set_message_budget(&self, _budget: Option<u64>) {}
 }
 
 /// Messages a node sent or received, by kind.
@@ -147,6 +153,9 @@ pub struct MessageCounts {
     pub cursors: u64,
     /// Bytes on the wire.
     pub bytes: u64,
+    /// Messages not sent because the (pretend) budget of the epoch was used up. Not part of
+    /// `messages()`.
+    pub blocked: u64,
 }
 
 impl MessageCounts {
@@ -196,4 +205,6 @@ pub struct TransportStats {
     pub sent_last_epoch: MessageCounts,
     pub received: MessageCounts,
     pub topics: Vec<TopicStats>,
+    /// The pretend budget per epoch, if any (`SyncBackend::set_message_budget`).
+    pub budget: Option<u64>,
 }

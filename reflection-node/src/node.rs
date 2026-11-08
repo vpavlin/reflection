@@ -357,6 +357,12 @@ impl Node {
         self.inner.backend.stats()
     }
 
+    /// Pretend the transport allows at most `budget` messages per RLN epoch (Logos Delivery
+    /// only): further messages are held back and counted as `blocked`. `None`: no limit.
+    pub fn set_message_budget(&self, budget: Option<u64>) {
+        self.inner.backend.set_message_budget(budget);
+    }
+
     async fn stream_with<T>(
         &self,
         topic: p2panda::Topic,

@@ -45,6 +45,12 @@ device publishes nothing of its own for a background document.
    snapshots, heads, repairs, relayed, presence, cursors), per RLN epoch and per document, with
    the devices heard from. Apps show it to whoever wants to see where their budget goes.
 
+7. **Pretend budget**: `Node::set_message_budget(Some(n))` makes the Logos backend refuse to send
+   more than `n` messages per epoch, counting the rest as `blocked`, the way RLN would drop
+   them. The real limits are not decided yet (100 per epoch is widely seen as too few, and it is
+   shared by every app on a node), so nothing in the code assumes a number: apps let the user
+   pick one to try out tiers.
+
 How often an application publishes its own edits is its business: the Basecamp app merges the
 edits of the open note into at most one operation every few seconds, and publishes one snapshot
 after the user stops (reflection-basecamp).

@@ -155,6 +155,8 @@ struct Inner {
     topic_list: StdMutex<Vec<Arc<TopicState>>>,
     counters: StdMutex<Counters>,
     started: Instant,
+    /// Pretend RLN budget per epoch (`set_message_budget`).
+    budget: StdMutex<Option<u64>>,
 }
 
 /// What we sent or received, for `stats`.
@@ -221,6 +223,12 @@ impl Counters {
         self.sent_this_epoch.add(kind, bytes);
     }
 
+    fn blocked(&mut self) {
+        self.roll();
+        self.sent.blocked += 1;
+        self.sent_this_epoch.blocked += 1;
+    }
+
     fn received(&mut self, kind: Kind, bytes: usize) {
         self.received.add(kind, bytes);
     }
@@ -244,6 +252,7 @@ impl LogosBackend {
                 topic_list: StdMutex::new(Vec::new()),
                 counters: StdMutex::new(Counters::default()),
                 started: Instant::now(),
+                budget: StdMutex::new(None),
             }),
         })
     }
@@ -401,6 +410,10 @@ impl SyncBackend for LogosBackend {
     fn stats(&self) -> Option<TransportStats> {
         Some(self.inner.stats())
     }
+
+    fn set_message_budget(&self, budget: Option<u64>) {
+        *self.inner.budget.lock().unwrap() = budget;
+    }
 }
 
 #[derive(Default)]
@@ -545,13 +558,26 @@ impl Inner {
             sent_last_epoch: counters.sent_last_epoch.clone(),
             received: counters.received.clone(),
             topics,
+            budget: *self.budget.lock().unwrap(),
         }
     }
 
     async fn send(&self, state: &TopicState, content_topic: &str, frame: &Frame, kind: Kind) {
         let payload = state.keys.seal(frame);
         let bytes = payload.len();
-        self.counters.lock().unwrap().sent(kind, bytes);
+        {
+            let mut counters = self.counters.lock().unwrap();
+            counters.roll();
+            let budget = *self.budget.lock().unwrap();
+            if budget.is_some_and(|budget| counters.sent_this_epoch.messages() >= budget) {
+                // What RLN would do: the epoch's messages are used up.
+                counters.blocked();
+                state.counters.lock().unwrap().blocked();
+                debug!(?kind, "message budget used up, not sending");
+                return;
+            }
+            counters.sent(kind, bytes);
+        }
         state.counters.lock().unwrap().sent(kind, bytes);
         if let Err(error) = self.bus.publish(content_topic.to_owned(), payload).await {
             warn!("failed to publish on {content_topic}: {error}");

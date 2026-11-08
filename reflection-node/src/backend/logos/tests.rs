@@ -524,3 +524,29 @@ async fn bridge_relays_snapshots_not_every_keystroke() {
     bridge.shutdown().await.unwrap();
     on_logos.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+#[test_log::test]
+async fn pretend_budget_blocks_what_rln_would_drop() {
+    let topic = random_topic();
+    let alice = node(None).await;
+    alice.set_message_budget(Some(3));
+    let alice_stream = alice
+        .stream_in_background(topic, Recorder::default())
+        .await
+        .unwrap();
+    for i in 0..5u8 {
+        alice_stream.publish_delta(vec![i]).await.unwrap();
+    }
+    let stats = alice.transport_stats().unwrap();
+    assert_eq!(stats.budget, Some(3));
+    assert_eq!(stats.sent_this_epoch.messages(), 3, "{stats:?}");
+    assert_eq!(stats.sent_this_epoch.blocked, 2, "{stats:?}");
+
+    // Lifting the limit lets messages through again.
+    alice.set_message_budget(None);
+    alice_stream.publish_delta(vec![9]).await.unwrap();
+    assert_eq!(sent(&alice).ops, 4);
+
+    alice.shutdown().await.unwrap();
+}
