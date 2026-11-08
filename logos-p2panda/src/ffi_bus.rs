@@ -18,8 +18,8 @@ use base64::Engine;
 use tokio::sync::{broadcast, oneshot};
 use tracing::{info, warn};
 
-use super::bus::{BusError, BusMessage, DeliveryBus};
-use crate::backend::BoxFuture;
+use crate::BoxFuture;
+use crate::bus::{BusError, BusMessage, DeliveryBus};
 
 const RET_OK: c_int = 0;
 const RET_MISSING_CALLBACK: c_int = 2;
@@ -369,7 +369,7 @@ impl DeliveryBus for LibLogosDeliveryBus {
 static LOCAL_NODES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Configuration for a node that only talks to other local-only nodes in this process.
-pub(crate) fn local_config() -> String {
+pub fn local_config() -> String {
     let entry_nodes = LOCAL_NODES.lock().unwrap().clone();
     serde_json::json!({
         "mode": "Core",
@@ -389,7 +389,7 @@ pub(crate) fn local_config() -> String {
     .to_string()
 }
 
-pub(crate) async fn register_local(bus: &LibLogosDeliveryBus) {
+pub async fn register_local(bus: &LibLogosDeliveryBus) {
     match bus.multiaddrs().await {
         Ok(addrs) => LOCAL_NODES.lock().unwrap().extend(addrs),
         Err(error) => warn!("can't read the node's addresses: {error}"),
@@ -401,7 +401,7 @@ pub(crate) async fn register_local(bus: &LibLogosDeliveryBus) {
 /// The same node configuration loam_core uses by default (a mirror of logos-delivery v0.39's
 /// `LogosTestConf`), so a GTK Reflection and a Basecamp one on loam_core meet on one network.
 /// With `preset: "logos.test"` RLN is on, and without a membership every send fails.
-pub(crate) fn default_config() -> String {
+pub fn default_config() -> String {
     serde_json::json!({
         "mode": "Core",
         "preset": "",

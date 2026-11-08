@@ -3589,6 +3589,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "953f07c43838f8e6f9758cab68bf5bed85465e7587ebe0b823f1bcd81978ad3a"
 
 [[package]]
+name = "logos-p2panda"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chacha20poly1305",
+ "hex",
+ "libloading",
+ "p2panda",
+ "p2panda-core",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+]
+
+[[package]]
 name = "loom"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5392,16 +5411,12 @@ dependencies = [
 name = "reflection-node"
 version = "0.5.0"
 dependencies = [
- "base64 0.22.1",
- "chacha20poly1305",
  "chrono",
- "hex",
- "libloading",
+ "logos-p2panda",
  "p2panda",
  "p2panda-core",
  "p2panda-store",
  "serde",
- "serde_json",
  "sqlx",
  "test-log",
  "thiserror 2.0.18",

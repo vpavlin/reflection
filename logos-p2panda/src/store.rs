@@ -5,7 +5,7 @@
 use p2panda::{Hash, Topic, VerifyingKey};
 use sqlx::{Row, SqlitePool};
 
-use super::Op;
+use crate::Op;
 
 #[derive(Clone, Debug)]
 pub(crate) struct OpStore {

@@ -19,31 +19,26 @@
 //! holds an author's new operations for `RELAY_WINDOW` and then relays only the newest snapshot
 //! (an operation with the prune flag, which replaces everything before it), or, if there is no
 //! snapshot among them, all of them in order. Its own presence goes to Logos at the Logos rate.
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
+use p2panda::Topic;
 use p2panda::node::CreateStreamError;
 use p2panda::streams::{StreamEvent, StreamFrom};
-use p2panda::{Topic, VerifyingKey};
-use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
-use tokio_stream::wrappers::UnboundedReceiverStream;
-use tracing::{debug, error};
+use tracing::error;
 
-use super::logos::{LogosBackend, Op};
+use super::logos::{LogosBackend, Op, is_presence_ping};
 use super::p2panda_backend::{P2pandaBackend, P2pandaOpPublisher, to_op_event};
 use super::{
     BoxFuture, EphemeralPublisher, EphemeralStream, OpPublisher, OpStream, SyncBackend,
     TransportStats,
 };
-use crate::author_tracker::AuthorTrackerMessage;
 use crate::ephemeral_message::EphemeralMessage;
 use crate::node::{ConnectionMode, NodeError};
 use crate::topic_stream::PublishError;
 
 /// How long the bridge collects an author's operations before relaying them to Logos.
-const RELAY_WINDOW: Duration = Duration::from_secs(15);
+const RELAY_WINDOW: std::time::Duration = logos_p2panda::bridge::RELAY_WINDOW;
 
 #[derive(Debug)]
 pub(crate) struct BridgeBackend {
@@ -67,16 +62,17 @@ impl SyncBackend for BridgeBackend {
                 .await?;
 
             // Logos -> p2panda.
-            let from_logos = self.logos.subscribe_raw(topic).await?;
-            let imports = UnboundedReceiverStream::new(from_logos).map(|op| op.to_operation());
+            let from_logos = logos_p2panda::bridge::from_logos(self.logos.sync(), topic)
+                .await
+                .map_err(|error| CreateStreamError(error.to_string()))?;
             publisher
-                .import(imports)
+                .import(from_logos)
                 .await
                 .map_err(|error| CreateStreamError(error.to_string()))?;
 
-            // p2panda -> Logos, collected per author (see the module docs).
-            let (to_logos, relay_rx) = mpsc::unbounded_channel::<Op>();
-            tokio::spawn(relay_loop(self.logos.clone(), topic, relay_rx));
+            // p2panda -> Logos, collected per author (see logos_p2panda::bridge).
+            let to_logos =
+                logos_p2panda::bridge::to_logos(self.logos.sync().clone(), topic, RELAY_WINDOW);
 
             let events = events.filter_map(move |event| {
                 if let StreamEvent::Processed { operation, .. } = &event {
@@ -103,7 +99,7 @@ impl SyncBackend for BridgeBackend {
     ) -> BoxFuture<'_, Result<EphemeralStream, CreateStreamError>> {
         Box::pin(async move {
             let (p2panda_publisher, p2panda_events) = self.p2panda.ephemeral_stream(topic).await?;
-            let (logos_publisher, logos_events) = self.logos.ephemeral(topic).await?;
+            let (logos_publisher, logos_events) = self.logos.ephemeral_stream(topic).await?;
             let publisher: Box<dyn EphemeralPublisher> = Box::new(BothEphemeral {
                 p2panda: p2panda_publisher,
                 logos: logos_publisher,
@@ -135,51 +131,6 @@ impl SyncBackend for BridgeBackend {
     }
 }
 
-/// Relay p2panda operations to Logos, collecting each author's for `RELAY_WINDOW`.
-async fn relay_loop(logos: LogosBackend, topic: Topic, mut rx: mpsc::UnboundedReceiver<Op>) {
-    let mut held: HashMap<VerifyingKey, Vec<Op>> = HashMap::new();
-    let mut deadline: Option<tokio::time::Instant> = None;
-    loop {
-        let flush = async {
-            match deadline {
-                Some(at) => tokio::time::sleep_until(at).await,
-                None => std::future::pending().await,
-            }
-        };
-        tokio::select! {
-            op = rx.recv() => {
-                let Some(op) = op else { break };
-                held.entry(op.author()).or_default().push(op);
-                deadline.get_or_insert_with(|| tokio::time::Instant::now() + RELAY_WINDOW);
-            }
-            _ = flush => {
-                deadline = None;
-                for (_, ops) in held.drain() {
-                    for op in to_relay(ops) {
-                        logos.relay(topic, op).await;
-                    }
-                }
-            }
-        }
-    }
-    for (_, ops) in held.drain() {
-        for op in to_relay(ops) {
-            logos.relay(topic, op).await;
-        }
-    }
-    debug!(%topic, "bridge relay to Logos ended");
-}
-
-/// Of one author's operations (in log order): the newest snapshot and what follows it, or all
-/// of them if there is no snapshot.
-fn to_relay(mut ops: Vec<Op>) -> Vec<Op> {
-    ops.sort_by_key(|op| op.seq());
-    match ops.iter().rposition(|op| op.prunes()) {
-        Some(last_snapshot) => ops.split_off(last_snapshot),
-        None => ops,
-    }
-}
-
 struct BothEphemeral {
     p2panda: Box<dyn EphemeralPublisher>,
     logos: Box<dyn EphemeralPublisher>,
@@ -191,13 +142,11 @@ struct BothEphemeral {
 impl EphemeralPublisher for BothEphemeral {
     fn publish(&self, message: EphemeralMessage) -> BoxFuture<'_, Result<(), PublishError>> {
         Box::pin(async move {
-            let to_logos = match &message {
-                EphemeralMessage::AuthorTracker(AuthorTrackerMessage::Ping) => self
+            let to_logos = !is_presence_ping(&message)
+                || self
                     .pings
                     .fetch_add(1, Ordering::Relaxed)
-                    .is_multiple_of(self.logos_ping_every),
-                _ => true,
-            };
+                    .is_multiple_of(self.logos_ping_every);
             let logos = if to_logos {
                 self.logos.publish(message.clone()).await
             } else {

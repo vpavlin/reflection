@@ -1,0 +1,31 @@
+[package]
+name = "logos-p2panda"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "p2panda operations over Logos Delivery: an encrypted per-topic protocol with catch-up by heads, an RLN-aware sender, and a bridge to p2panda networks"
+repository = "https://github.com/vpavlin/reflection"
+
+[features]
+# The liblogosdelivery bus. The library is loaded at runtime: nothing native at build time.
+ffi = ["dep:libloading", "dep:base64", "dep:serde_json"]
+# The bus in local test mode (no entry nodes, loopback); for tests only.
+test_utils = []
+
+[dependencies]
+p2panda = "0.7.0"
+p2panda-core = "0.7.0"
+chacha20poly1305 = "0.10.1"
+hex = "0.4.3"
+libloading = { version = "0.8", optional = true }
+base64 = { version = "0.22.1", optional = true }
+serde_json = { version = "1.0", optional = true }
+serde = { version = "1.0.228", features = ["derive"] }
+sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite"], default-features = false }
+thiserror = "2.0.18"
+tokio = { version = "1.52.3", features = ["rt", "sync", "time", "macros"] }
+tracing = "0.1"
+tokio-stream = "0.1.18"
+
+[dev-dependencies]
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "time"] }

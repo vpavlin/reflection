@@ -11,20 +11,17 @@ authors = [
 [features]
 test_utils = []
 # Sync over Logos Delivery (docs/logos). Pure Rust: includes the in-memory bus for tests.
-logos = ["dep:p2panda-core", "dep:chacha20poly1305", "dep:hex"]
+logos = ["dep:logos-p2panda", "dep:p2panda-core"]
 # Adds the liblogosdelivery bus. The library is loaded at runtime: nothing native at build time.
-logos-ffi = ["logos", "dep:libloading", "dep:base64", "dep:serde_json"]
+logos-ffi = ["logos", "logos-p2panda/ffi"]
 
 [dependencies]
 chrono = "0.4.43"
 p2panda = "0.7.0"
 p2panda-store = "0.7.0"
 p2panda-core = { version = "0.7.0", optional = true }
-chacha20poly1305 = { version = "0.10.1", optional = true }
-hex = { version = "0.4.3", optional = true }
-libloading = { version = "0.8", optional = true }
-base64 = { version = "0.22.1", optional = true }
-serde_json = { version = "1.0", optional = true }
+# The Logos Delivery protocol (docs/logos), MIT OR Apache-2.0.
+logos-p2panda = { path = "../logos-p2panda", optional = true }
 serde = { version = "1.0.228", features = ["derive"] }
 sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite", "chrono"], default-features = false }
 thiserror = "2.0.18"

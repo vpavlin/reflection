@@ -156,6 +156,9 @@ pub struct MessageCounts {
     /// Messages not sent because the (pretend) budget of the epoch was used up. Not part of
     /// `messages()`.
     pub blocked: u64,
+    /// Repairs not sent because of the repair cap (a peer asked again too soon, or the topic's
+    /// repairs of the epoch were used up). Not part of `messages()`.
+    pub repairs_capped: u64,
 }
 
 impl MessageCounts {

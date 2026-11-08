@@ -451,8 +451,8 @@ async fn background_peer_still_answers_catch_up() {
     alice.shutdown().await.unwrap();
     drop(alice);
     // Her backend's tasks outlive the node in this test; take her off the bus.
-    let keys = super::wire::TopicKeys::new(&network().into(), &topic);
-    for content_topic in [keys.ops_topic, keys.ephemeral_topic] {
+    let (ops_topic, ephemeral_topic) = logos_p2panda::content_topics(&network().into(), &topic);
+    for content_topic in [ops_topic, ephemeral_topic] {
         crate::logos::DeliveryBus::unsubscribe(&*alice_bus, content_topic)
             .await
             .unwrap();

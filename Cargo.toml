@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["reflection-app", "reflection-doc", "reflection-node"]
+members = ["logos-p2panda", "reflection-app", "reflection-doc", "reflection-node"]
 [patch.crates-io]
 # p2panda 0.7.0 + one commit: push imported operations to live sync sessions (the bridge needs
 # it, ADR 0007). Branch live-push-imports on vpavlin/p2panda; to be proposed upstream.

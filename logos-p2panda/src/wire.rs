@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 pub(crate) const WIRE_VERSION: u8 = 1;
 
 /// Largest operation we send. Logos Delivery messages are limited to about 150 KB.
-pub(crate) const MAX_FRAME_LEN: usize = 140 * 1024;
+pub const MAX_FRAME_LEN: usize = 140 * 1024;
 
 const NONCE_LEN: usize = 24;
 

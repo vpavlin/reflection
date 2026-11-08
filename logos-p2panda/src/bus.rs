@@ -5,7 +5,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use thiserror::Error;
 use tokio::sync::broadcast;
 
-use crate::backend::BoxFuture;
+use crate::BoxFuture;
 
 /// A message on a Logos Delivery content topic.
 #[derive(Clone, Debug)]
