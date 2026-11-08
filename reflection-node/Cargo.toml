@@ -11,7 +11,7 @@ authors = [
 [features]
 test_utils = []
 # Sync over Logos Delivery (docs/logos). Pure Rust: includes the in-memory bus for tests.
-logos = ["dep:logos-p2panda", "dep:p2panda-core"]
+logos = ["dep:logos-p2panda"]
 # Adds the liblogosdelivery bus. The library is loaded at runtime: nothing native at build time.
 logos-ffi = ["logos", "logos-p2panda/ffi"]
 
@@ -19,7 +19,8 @@ logos-ffi = ["logos", "logos-p2panda/ffi"]
 chrono = "0.4.43"
 p2panda = "0.7.0"
 p2panda-store = "0.7.0"
-p2panda-core = { version = "0.7.0", optional = true }
+p2panda-core = "0.7.0"
+ciborium = "0.2.2"
 # The Logos Delivery protocol (docs/logos), MIT OR Apache-2.0.
 logos-p2panda = { path = "../logos-p2panda", optional = true }
 serde = { version = "1.0.228", features = ["derive"] }

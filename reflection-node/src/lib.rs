@@ -21,6 +21,14 @@ pub use node::{Node, NodeError, TrackedAuthor, TrackedTopic};
 pub use topic_stream::{PublishError, TopicStream, TopicStreamError};
 pub use traits::{TopicSubscription, TopicSubscriptionError};
 
+/// Sync through a p2panda node run by the host (e.g. Logos Basecamp's `p2panda_core`).
+pub mod external {
+    pub use crate::backend::BoxFuture;
+    #[cfg(any(test, feature = "test_utils"))]
+    pub use crate::backend::external::NodeBus;
+    pub use crate::backend::external::{P2pandaBus, P2pandaItem};
+}
+
 /// Sync over Logos Delivery, see `docs/logos`.
 #[cfg(feature = "logos")]
 pub mod logos {

@@ -67,6 +67,9 @@ enum BackendChoice {
     Logos,
     #[cfg(feature = "logos-ffi")]
     Bridge,
+    /// p2panda through the `P2pandaBus` of an in-process node (tests the external backend).
+    #[cfg(any(test, feature = "test_utils"))]
+    P2pandaExternal,
 }
 
 #[cfg(feature = "logos")]
@@ -79,6 +82,8 @@ pub(crate) enum Transport {
     Logos(ExternalBus),
     #[cfg(feature = "logos")]
     Bridge(ExternalBus),
+    /// A p2panda node run by the host.
+    External(Arc<dyn crate::external::P2pandaBus>),
 }
 
 /// Start a Logos Delivery node through liblogosdelivery, configured from the environment:
@@ -114,6 +119,16 @@ async fn p2panda_backend(
     network_id: NetworkId,
     pool: sqlx::SqlitePool,
 ) -> Result<P2pandaBackend, NodeError> {
+    Ok(P2pandaBackend::new(
+        p2panda_node(signing_key, network_id, pool).await?,
+    ))
+}
+
+async fn p2panda_node(
+    signing_key: SigningKey,
+    network_id: NetworkId,
+    pool: sqlx::SqlitePool,
+) -> Result<p2panda::Node, NodeError> {
     let mut builder = p2panda::Node::builder()
         .network_id(network_id)
         .signing_key(signing_key)
@@ -126,7 +141,7 @@ async fn p2panda_backend(
             .relay_url(RELAY_URL.clone());
     }
 
-    Ok(P2pandaBackend::new(builder.spawn().await?))
+    Ok(builder.spawn().await?)
 }
 
 fn backend_choice() -> Result<BackendChoice, String> {
@@ -141,6 +156,8 @@ fn backend_choice() -> Result<BackendChoice, String> {
         "logos" => Ok(BackendChoice::Logos),
         #[cfg(feature = "logos-ffi")]
         "bridge" => Ok(BackendChoice::Bridge),
+        #[cfg(any(test, feature = "test_utils"))]
+        "p2panda-external" => Ok(BackendChoice::P2pandaExternal),
         other => Err(format!(
             "REFLECTION_BACKEND={other} is not available in this build"
         )),
@@ -227,6 +244,23 @@ impl Node {
             network_id.into(),
             db_location,
             Some(Transport::Bridge(bus)),
+        )
+        .await
+    }
+
+    /// Create a node that syncs through a p2panda node run by the host (`P2pandaBus`), whatever
+    /// `REFLECTION_BACKEND` says. The host's node must sign with `signing_key`.
+    pub async fn with_p2panda_bus(
+        signing_key: SigningKey,
+        network_id: impl Into<NetworkId>,
+        db_location: Option<&Path>,
+        bus: Arc<dyn crate::external::P2pandaBus>,
+    ) -> Result<Self, NodeError> {
+        Self::spawn(
+            signing_key,
+            network_id.into(),
+            db_location,
+            Some(Transport::External(bus)),
         )
         .await
     }
@@ -436,11 +470,20 @@ impl NodeInner {
                 BackendChoice::Logos => Transport::Logos(logos_ffi_bus().await?),
                 #[cfg(feature = "logos-ffi")]
                 BackendChoice::Bridge => Transport::Bridge(logos_ffi_bus().await?),
+                #[cfg(any(test, feature = "test_utils"))]
+                BackendChoice::P2pandaExternal => {
+                    let node = p2panda_node(signing_key.clone(), network_id, pool.clone()).await?;
+                    Transport::External(Arc::new(crate::backend::external::NodeBus::new(node)))
+                }
             },
         };
 
         let backend: Box<dyn SyncBackend> = match transport {
             Transport::P2panda => Box::new(p2panda_backend(signing_key, network_id, pool).await?),
+            Transport::External(bus) => {
+                info!("syncing through the host's p2panda node");
+                Box::new(crate::backend::external::ExternalBackend::new(bus))
+            }
             #[cfg(feature = "logos")]
             Transport::Logos(bus) => {
                 info!("syncing over Logos Delivery");

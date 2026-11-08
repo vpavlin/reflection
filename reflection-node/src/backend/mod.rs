@@ -26,6 +26,7 @@ use crate::traits::TopicSubscriptionError;
 
 #[cfg(feature = "logos")]
 pub(crate) mod bridge;
+pub(crate) mod external;
 #[cfg(feature = "logos")]
 pub(crate) mod logos;
 pub(crate) mod p2panda_backend;

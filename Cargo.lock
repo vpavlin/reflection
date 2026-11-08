@@ -5412,6 +5412,7 @@ name = "reflection-node"
 version = "0.5.0"
 dependencies = [
  "chrono",
+ "ciborium",
  "logos-p2panda",
  "p2panda",
  "p2panda-core",

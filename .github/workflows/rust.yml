@@ -61,6 +61,15 @@ jobs:
             --exclude ${{ env.EXCLUDE_PACKAGES }} \
             --all-features
 
+      - name: Run tests through a host's p2panda node (external backend)
+        env:
+          REFLECTION_BACKEND: p2panda-external
+        run: |
+          cargo test \
+            --workspace \
+            --exclude ${{ env.EXCLUDE_PACKAGES }} \
+            --all-features
+
       - name: Run tests on the bridge (p2panda and Logos)
         env:
           REFLECTION_BACKEND: bridge-memory
