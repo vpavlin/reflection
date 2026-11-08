@@ -5,7 +5,16 @@
 #   gh workflow run logos-flatpak.yml --repo vpavlin/reflection --ref feat/logos-delivery
 name: Logos Flatpak
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+  push:
+    branches: [feat/logos-delivery]
+    paths:
+      - cx.modal.Reflection.Logos.json
+      - .github/workflows/logos-flatpak.yml
+      - reflection-app/**
+      - reflection-doc/**
+      - reflection-node/**
 
 jobs:
   flatpak:
