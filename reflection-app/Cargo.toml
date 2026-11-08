@@ -8,6 +8,11 @@ authors = [
   "Julian Sparber <julian@sparber.net>"
 ]
 
+[features]
+# Sync over Logos Delivery as well as p2panda, picked with REFLECTION_BACKEND (docs/logos).
+# The Delivery library is loaded at runtime from REFLECTION_LOGOS_LIB.
+logos = ["reflection-doc/logos-ffi"]
+
 [dependencies]
 reflection-doc = { path = "../reflection-doc" }
 gettext-rs = { version = "0.7", features = ["gettext-system"] }

@@ -50,6 +50,10 @@ cargo_opt  = [ '--manifest-path', meson.project_source_root() / 'Cargo.toml' ]
 cargo_opt += [ '--target-dir', meson.project_build_root()  / 'reflection-app/src' ]
 cargo_env  = [ 'CARGO_HOME=' + meson.project_build_root()  / 'cargo-home' ]
 
+if get_option('logos')
+  cargo_opt += [ '--features', 'reflection/logos' ]
+endif
+
 if get_option('buildtype') == 'release'
   cargo_opt += [ '--release' ]
   rust_target = 'release'

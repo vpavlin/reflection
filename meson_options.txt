@@ -1,0 +1,2 @@
+option('logos', type: 'boolean', value: false,
+  description: 'Build with the Logos Delivery sync backend (selected at runtime with REFLECTION_BACKEND=logos)')

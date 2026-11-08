@@ -1,0 +1,97 @@
+{
+  "id": "cx.modal.Reflection",
+  "runtime": "org.gnome.Platform",
+  "runtime-version": "49",
+  "sdk": "org.gnome.Sdk",
+  "sdk-extensions": [
+    "org.freedesktop.Sdk.Extension.rust-stable"
+  ],
+  "command": "reflection",
+  "finish-args": [
+    "--share=network",
+    "--share=ipc",
+    "--socket=fallback-x11",
+    "--device=dri",
+    "--socket=wayland",
+    "--env=RUST_BACKTRACE=1",
+    "--env=RUST_LOG=reflection=INFO,reflection_doc=INFO,reflection_node=INFO,p2panda=INFO,p2panda_net=WARN,p2panda_discovery=WARN,p2panda_sync=WARN",
+    "--env=REFLECTION_BACKEND=logos",
+    "--env=REFLECTION_LOGOS_LIB=/app/lib/logos/liblogosdelivery.so"
+  ],
+  "build-options": {
+    "append-path": "/usr/lib/sdk/rust-stable/bin",
+    "build-args": [
+      "--share=network"
+    ]
+  },
+  "cleanup": [
+    "/include",
+    "/lib/pkgconfig",
+    "/man",
+    "/share/doc",
+    "/share/gtk-doc",
+    "/share/man",
+    "/share/pkgconfig",
+    "*.la",
+    "*.a"
+  ],
+  "modules": [
+    {
+      "name": "libspelling",
+      "builddir": true,
+      "buildsystem": "meson",
+      "sources": [
+        {
+          "type": "git",
+          "url": "https://gitlab.gnome.org/GNOME/libspelling.git",
+          "branch": "main"
+        }
+      ]
+    },
+    {
+      "name": "logos-delivery",
+      "buildsystem": "simple",
+      "build-options": {
+        "strip": false,
+        "no-debuginfo": true
+      },
+      "build-commands": [
+        "install -Dm755 -t /app/lib/logos liblogosdelivery.so librln.so libgomp.so.1"
+      ],
+      "sources": [
+        {
+          "type": "archive",
+          "only-arches": [
+            "x86_64"
+          ],
+          "url": "https://github.com/vpavlin/reflection/releases/download/logos-delivery-0.3.0/logos-delivery-0.3.0-x86_64.tar.gz",
+          "sha256": "fdcd17b5b8801cff77eddfede409b768fd5671771a32834a746b2411c8ec63c9"
+        },
+        {
+          "type": "archive",
+          "only-arches": [
+            "aarch64"
+          ],
+          "url": "https://github.com/vpavlin/reflection/releases/download/logos-delivery-0.3.0/logos-delivery-0.3.0-aarch64.tar.gz",
+          "sha256": "b2e9dfec5e5f77df9d8fd2b30f37651244edab737025b929a27730cb33bcd550"
+        }
+      ]
+    },
+    {
+      "name": "reflection",
+      "builddir": true,
+      "buildsystem": "meson",
+      "sources": [
+        {
+          "type": "git",
+          "url": "./",
+          "branch": "HEAD"
+        }
+      ],
+      "config-opts": [
+        "-Dlogos=true"
+      ]
+    }
+  ],
+  "branch": "logos"
+}

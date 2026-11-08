@@ -261,7 +261,15 @@ impl ReflectionApplication {
         let signing_key = secret::get_or_create_identity().await?;
 
         let mut data_path = glib::user_data_dir();
-        data_path.push("Reflection");
+        // Another sync backend (REFLECTION_BACKEND, see docs/logos) keeps its own database, so
+        // documents and stores of different networks never mix.
+        match std::env::var("REFLECTION_BACKEND")
+            .ok()
+            .filter(|b| !b.is_empty() && b != "p2panda")
+        {
+            Some(backend) => data_path.push(format!("Reflection-{backend}")),
+            None => data_path.push("Reflection"),
+        }
         data_path.push(signing_key.verifying_key().to_string());
         fs::create_dir_all(&data_path)?;
         let data_dir = gio::File::for_path(data_path);
