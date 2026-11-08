@@ -86,11 +86,15 @@ Larger ones are refused by the sender in version 1.
 ### 4.2 `heads`: catch-up
 
 The latest `(author, seq, hash)` of each author's log on this document, as the sender has it.
-Sent on the **ops** topic:
+Sent on the **ops** topic, and only for a document the sender has open ("active", ADR 0008):
 
-- when subscribing, and then after 1, 2, 4, … seconds, capped at one every 60 seconds;
-- at most every 500 ms when the sender notices it is behind (a gap, a newer head in someone
-  else's `heads`, or a dropped receive queue).
+- when it becomes active: 0.5, 5 and 30 seconds after, then not again until it is next
+  activated (until 2026-11-08: on subscribing, then backing off to one every 60 seconds);
+- at most every 500 ms while active, when the sender notices it is behind (a gap, a newer
+  head in someone else's `heads`, or a dropped receive queue).
+
+A document the sender only has in the background sends no heads at all. It still answers other
+peers' heads with repairs.
 
 A receiver compares with its own logs:
 
@@ -109,7 +113,9 @@ whose content has not changed, and with it the request for a repair.
 
 ### 4.3 `eph`: ephemeral messages
 
-Presence (hello, ping, bye) and cursor positions. They are not stored or repaired.
+Presence (hello, ping, bye) and cursor positions. They are not stored or repaired. Presence is
+sent only for a document the sender has open: hello on opening, a ping every 120 seconds, bye
+on closing. A peer is shown offline after 240 seconds without one.
 
 ```
 signature = ed25519(author, cbor(["reflection-eph-v1", T, author, timestamp, body]))

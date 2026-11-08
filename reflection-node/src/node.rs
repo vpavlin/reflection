@@ -336,12 +336,41 @@ impl Node {
     where
         T: TopicSubscription + 'static,
     {
-        let topic = topic.into();
+        self.stream_with(topic.into(), subscription, true).await
+    }
+
+    /// Like `stream`, for a topic the user does not have open: it receives everything, but
+    /// announces nothing until `TopicStream::set_active(true)`.
+    pub async fn stream_in_background<T>(
+        &self,
+        topic: impl Into<p2panda::Topic>,
+        subscription: T,
+    ) -> Result<TopicStream<T>, TopicStreamError>
+    where
+        T: TopicSubscription + 'static,
+    {
+        self.stream_with(topic.into(), subscription, false).await
+    }
+
+    /// Message counters of the transport, if it pays per message (Logos Delivery).
+    pub fn transport_stats(&self) -> Option<crate::TransportStats> {
+        self.inner.backend.stats()
+    }
+
+    async fn stream_with<T>(
+        &self,
+        topic: p2panda::Topic,
+        subscription: T,
+        active: bool,
+    ) -> Result<TopicStream<T>, TopicStreamError>
+    where
+        T: TopicSubscription + 'static,
+    {
         let subscription = Arc::new(subscription);
         let inner = self.inner.clone();
         let inner_subscription = self
             .runtime
-            .spawn(async move { inner.stream(topic, subscription).await })
+            .spawn(async move { inner.stream(topic, subscription, active).await })
             .await??;
 
         let subscription = TopicStream::new(self.runtime.clone(), inner_subscription).await;
@@ -453,6 +482,7 @@ impl NodeInner {
         self: Arc<Self>,
         topic: impl Into<p2panda::Topic>,
         subscribable_topic: Arc<T>,
+        active: bool,
     ) -> Result<TopicStreamInner<T>, TopicStreamError>
     where
         T: TopicSubscription + 'static,
@@ -470,6 +500,7 @@ impl NodeInner {
             self.clone(),
             topic,
             subscribable_topic,
+            active,
         ))
     }
 

@@ -14,6 +14,7 @@ mod topic_store;
 mod topic_stream;
 mod traits;
 
+pub use backend::{MessageCounts, PeerSeen, TopicStats, TransportStats};
 #[doc(hidden)] // FIXME: We're currently not supporting this feature.
 pub use node::ConnectionMode;
 pub use node::{Node, NodeError, TrackedAuthor, TrackedTopic};

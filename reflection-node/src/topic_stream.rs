@@ -1,6 +1,7 @@
 use std::mem::take;
 use std::ops::DerefMut;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::Utc;
 use p2panda::Topic;
@@ -117,6 +118,18 @@ where
         Ok(())
     }
 
+    /// Tell the network layer whether the user has this topic open. Streams from `Node::stream`
+    /// start active, those from `Node::stream_in_background` inactive. On an inactive topic we
+    /// keep receiving, but announce nothing (no presence, no catch-up requests), which matters
+    /// on a transport that charges per message sent (Logos Delivery under RLN).
+    pub async fn set_active(&self, active: bool) {
+        let inner = self.inner.clone();
+        let _ = self
+            .runtime
+            .spawn(async move { inner.set_active(active).await })
+            .await;
+    }
+
     /// Set the name for a given topic.
     ///
     /// This information will be written to the database.
@@ -136,6 +149,7 @@ pub(crate) struct TopicStreamInner<T> {
     subscription: Arc<T>,
     author_tracker: Arc<AuthorTracker<T>>,
     abort_handles: RwLock<Vec<AbortHandle>>,
+    active: AtomicBool,
 }
 
 impl<T> Drop for TopicStreamInner<T> {
@@ -150,8 +164,8 @@ impl<T> TopicStreamInner<T>
 where
     T: TopicSubscription + 'static,
 {
-    pub fn new(node: Arc<NodeInner>, topic: Topic, subscription: Arc<T>) -> Self {
-        let author_tracker = AuthorTracker::new(node.clone(), subscription.clone());
+    pub fn new(node: Arc<NodeInner>, topic: Topic, subscription: Arc<T>, active: bool) -> Self {
+        let author_tracker = AuthorTracker::new(node.clone(), subscription.clone(), active);
 
         TopicStreamInner {
             tx: RwLock::new(None),
@@ -161,7 +175,14 @@ where
             abort_handles: RwLock::new(Vec::new()),
             subscription,
             author_tracker,
+            active: AtomicBool::new(active),
         }
+    }
+
+    pub async fn set_active(&self, active: bool) {
+        self.active.store(active, Ordering::SeqCst);
+        self.author_tracker.set_active(active).await;
+        self.node.backend.set_active(self.topic, active).await;
     }
 
     pub async fn spawn_network_monitor(&self, ready_signal: oneshot::Sender<()>) {
@@ -178,6 +199,9 @@ where
                 *self.tx.write().await = Some(tx);
                 *self.ephemeral_tx.write().await = Some(ephemeral_tx);
                 *self.abort_handles.write().await = abort_handles;
+                if self.active.load(Ordering::SeqCst) {
+                    self.node.backend.set_active(self.topic, true).await;
+                }
             }
             Err(error) => {
                 self.subscription.error(error.into());

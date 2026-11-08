@@ -64,6 +64,7 @@ joins the public Logos test network (`{"mode": "Core", "preset": "logos.test"}`)
 | [0005](adr/0005-backend-selection-and-tests.md) | Pick the backend with a cargo feature and an env var; run the unchanged tests on every backend |
 | [0007](adr/0007-bridge.md) | A bridge node relays documents between p2panda and Logos Delivery |
 | [0006](adr/0006-basecamp-app-split.md) | The Basecamp app lives in its own repo and depends on this fork |
+| [0008](adr/0008-rln-message-budget.md) | Publish only for open documents: heads on opening, presence while open, a rate-limited bridge (RLN) |
 
 ## Status
 

@@ -374,3 +374,153 @@ async fn bridge_pushes_logos_edits_to_live_p2panda_peers() {
     }
     panic!("the live Logos edit did not reach the p2panda node within 15 s");
 }
+
+/// Messages a node sent so far, by kind.
+fn sent(node: &Node) -> crate::MessageCounts {
+    node.transport_stats().unwrap().sent
+}
+
+#[tokio::test]
+#[test_log::test]
+async fn background_topics_publish_nothing() {
+    let topic = random_topic();
+
+    let alice = node(None).await;
+    let alice_stream = alice.stream(topic, Recorder::default()).await.unwrap();
+
+    // Bob has the note but not open: he receives, and sends nothing at all.
+    let bob = node(None).await;
+    let bob_doc = Recorder::default();
+    let bob_stream = bob
+        .stream_in_background(topic, bob_doc.clone())
+        .await
+        .unwrap();
+    alice_stream.publish_delta(b"hello".to_vec()).await.unwrap();
+    assert_eq!(bob_doc.wait_for(1).await, vec![b"hello".to_vec()]);
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert_eq!(sent(&bob).messages(), 0, "{:?}", sent(&bob));
+
+    // Opening it announces him: presence, and heads so he catches up.
+    bob_stream.set_active(true).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let bob_sent = sent(&bob);
+    assert_eq!(bob_sent.presence, 1, "{bob_sent:?}");
+    assert_eq!(bob_sent.heads, 1, "{bob_sent:?}");
+
+    alice.shutdown().await.unwrap();
+    bob.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[test_log::test]
+async fn heads_are_not_sent_periodically() {
+    let topic = random_topic();
+    let alice = node(None).await;
+    let _alice_stream = alice.stream(topic, Recorder::default()).await.unwrap();
+
+    // 0.5 s and 5 s after opening; the last one is at 30 s, then nothing.
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    assert_eq!(sent(&alice).heads, 2, "{:?}", sent(&alice));
+
+    alice.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[test_log::test]
+async fn background_peer_still_answers_catch_up() {
+    let topic = random_topic();
+
+    // Alice writes while Bob has the note in the background, then goes away.
+    let alice_bus = Arc::new(MemoryBus::new());
+    let alice = Node::with_delivery_bus(SigningKey::generate(), network(), None, alice_bus.clone())
+        .await
+        .unwrap();
+    let alice_stream = alice.stream(topic, Recorder::default()).await.unwrap();
+    let bob = node(None).await;
+    let bob_doc = Recorder::default();
+    let _bob_stream = bob
+        .stream_in_background(topic, bob_doc.clone())
+        .await
+        .unwrap();
+    alice_stream
+        .publish_delta(b"from alice".to_vec())
+        .await
+        .unwrap();
+    assert_eq!(bob_doc.wait_for(1).await.len(), 1);
+    drop(alice_stream);
+    alice.shutdown().await.unwrap();
+    drop(alice);
+    // Her backend's tasks outlive the node in this test; take her off the bus.
+    let keys = super::wire::TopicKeys::new(&network().into(), &topic);
+    for content_topic in [keys.ops_topic, keys.ephemeral_topic] {
+        crate::logos::DeliveryBus::unsubscribe(&*alice_bus, content_topic)
+            .await
+            .unwrap();
+    }
+
+    // Carol opens the note: Bob answers her heads, though he never announces anything himself.
+    let carol = node(None).await;
+    let carol_doc = Recorder::default();
+    let _carol_stream = carol.stream(topic, carol_doc.clone()).await.unwrap();
+    assert_eq!(carol_doc.wait_for(1).await, vec![b"from alice".to_vec()]);
+    let bob_sent = sent(&bob);
+    assert_eq!(bob_sent.repairs, 1, "{bob_sent:?}");
+    assert_eq!(bob_sent.heads + bob_sent.presence, 0, "{bob_sent:?}");
+
+    bob.shutdown().await.unwrap();
+    carol.shutdown().await.unwrap();
+}
+
+/// The bridge does not relay a p2panda author's keystrokes one by one: it waits, then sends
+/// the newest snapshot and what follows it.
+#[tokio::test(flavor = "multi_thread")]
+#[test_log::test]
+async fn bridge_relays_snapshots_not_every_keystroke() {
+    let topic = random_topic();
+    let on_p2panda = Node::with_p2panda(SigningKey::generate(), network(), None)
+        .await
+        .unwrap();
+    let bridge = Node::with_bridge(
+        SigningKey::generate(),
+        network(),
+        None,
+        Arc::new(MemoryBus::new()),
+    )
+    .await
+    .unwrap();
+    let on_logos = node(None).await;
+
+    let logos_doc = Recorder::default();
+    let p2panda_stream = on_p2panda.stream(topic, Recorder::default()).await.unwrap();
+    let _bridge_stream = bridge.stream(topic, Recorder::default()).await.unwrap();
+    let _logos_stream = on_logos.stream(topic, logos_doc.clone()).await.unwrap();
+
+    for i in 0..10u8 {
+        p2panda_stream.publish_delta(vec![i]).await.unwrap();
+    }
+    p2panda_stream
+        .publish_snapshot(b"snapshot".to_vec())
+        .await
+        .unwrap();
+    p2panda_stream
+        .publish_delta(b"after".to_vec())
+        .await
+        .unwrap();
+
+    for _ in 0..1200 {
+        if logos_doc.received().iter().any(|m| m == b"after") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        logos_doc.received(),
+        vec![b"snapshot".to_vec(), b"after".to_vec()]
+    );
+    let relayed = bridge.transport_stats().unwrap().sent.relayed;
+    assert_eq!(relayed, 2);
+
+    on_p2panda.shutdown().await.unwrap();
+    bridge.shutdown().await.unwrap();
+    on_logos.shutdown().await.unwrap();
+}

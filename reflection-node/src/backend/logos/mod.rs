@@ -13,6 +13,7 @@ mod wire;
 mod tests;
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -31,8 +32,8 @@ use tracing::{debug, error, info, warn};
 use self::store::OpStore;
 use self::wire::{Bytes, Frame, MAX_FRAME_LEN, SignedEphemeral, TopicKeys};
 use super::{
-    BoxFuture, EphemeralEvent, EphemeralPublisher, EphemeralStream, OpEvent, OpPublisher, OpStream,
-    SyncBackend,
+    BoxFuture, EphemeralEvent, EphemeralPublisher, EphemeralStream, MessageCounts, OpEvent,
+    OpPublisher, OpStream, PeerSeen, SyncBackend, TopicStats, TransportStats,
 };
 use crate::ephemeral_message::EphemeralMessage;
 use crate::node::{ConnectionMode, NodeError};
@@ -40,9 +41,21 @@ use crate::topic_stream::PublishError;
 
 const CHANNEL_SIZE: usize = 1024;
 
-/// Heads are re-sent with this backoff after subscribing, then every `HEADS_MAX_INTERVAL`.
-const HEADS_FIRST_INTERVAL: Duration = Duration::from_secs(1);
-const HEADS_MAX_INTERVAL: Duration = Duration::from_secs(60);
+/// When a topic becomes active (the user opens it), its heads are sent at these delays, in case
+/// the first copy is lost, and then not again until the topic is next activated. Gaps found
+/// while active are asked for at once (`send_heads_behind`). Nothing is sent periodically:
+/// under RLN every message counts, and a topic nobody looks at needs no catch-up.
+const HEADS_ON_ACTIVATE: [Duration; 3] = [
+    Duration::from_millis(500),
+    Duration::from_secs(5),
+    Duration::from_secs(30),
+];
+
+/// Presence pings on an active topic (the p2panda backend pings every 30 s).
+const PRESENCE_INTERVAL: Duration = Duration::from_secs(120);
+
+/// RLN epoch length of Logos Delivery (`rlnEpochSizeSec`).
+const RLN_EPOCH_SECONDS: u64 = 600;
 
 /// A repair waits a random time in this range, so that one peer answers rather than all.
 const REPAIR_DELAY_MIN_MS: u64 = 50;
@@ -138,6 +151,79 @@ struct Inner {
     network_id: NetworkId,
     store: OpStore,
     topics: Mutex<HashMap<Topic, Arc<TopicState>>>,
+    /// All topics, for `stats` (which can't wait for the async lock).
+    topic_list: StdMutex<Vec<Arc<TopicState>>>,
+    counters: StdMutex<Counters>,
+    started: Instant,
+}
+
+/// What we sent or received, for `stats`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Kind {
+    Op,
+    Snapshot,
+    Heads,
+    Repair,
+    Relayed,
+    Presence,
+    Cursor,
+}
+
+impl MessageCounts {
+    fn add(&mut self, kind: Kind, bytes: usize) {
+        match kind {
+            Kind::Op => self.ops += 1,
+            Kind::Snapshot => self.snapshots += 1,
+            Kind::Heads => self.heads += 1,
+            Kind::Repair => self.repairs += 1,
+            Kind::Relayed => self.relayed += 1,
+            Kind::Presence => self.presence += 1,
+            Kind::Cursor => self.cursors += 1,
+        }
+        self.bytes += bytes as u64;
+    }
+}
+
+fn unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Counters of messages sent, per RLN epoch, and received.
+#[derive(Default)]
+struct Counters {
+    sent: MessageCounts,
+    epoch: u64,
+    sent_this_epoch: MessageCounts,
+    sent_last_epoch: MessageCounts,
+    received: MessageCounts,
+}
+
+impl Counters {
+    fn roll(&mut self) {
+        let epoch = unix_secs() / RLN_EPOCH_SECONDS;
+        if epoch != self.epoch {
+            self.sent_last_epoch = if epoch == self.epoch + 1 {
+                std::mem::take(&mut self.sent_this_epoch)
+            } else {
+                MessageCounts::default()
+            };
+            self.sent_this_epoch = MessageCounts::default();
+            self.epoch = epoch;
+        }
+    }
+
+    fn sent(&mut self, kind: Kind, bytes: usize) {
+        self.roll();
+        self.sent.add(kind, bytes);
+        self.sent_this_epoch.add(kind, bytes);
+    }
+
+    fn received(&mut self, kind: Kind, bytes: usize) {
+        self.received.add(kind, bytes);
+    }
 }
 
 impl LogosBackend {
@@ -155,6 +241,9 @@ impl LogosBackend {
                 network_id,
                 store,
                 topics: Mutex::new(HashMap::new()),
+                topic_list: StdMutex::new(Vec::new()),
+                counters: StdMutex::new(Counters::default()),
+                started: Instant::now(),
             }),
         })
     }
@@ -183,6 +272,8 @@ impl LogosBackend {
             }
             senders.raw = Some(tx);
         }
+        // The bridge has no user to open topics: it catches up once when it starts.
+        state.active.store(true, Ordering::SeqCst);
         state.restart_heads();
         Ok(rx)
     }
@@ -216,7 +307,7 @@ impl LogosBackend {
         }
         state.mark_seen(op.hash);
         self.inner
-            .send(&state, &state.keys.ops_topic, &op.frame())
+            .send(&state, &state.keys.ops_topic, &op.frame(), Kind::Relayed)
             .await;
     }
 
@@ -252,8 +343,7 @@ impl SyncBackend for LogosBackend {
                 senders.ops = Some(tx);
             }
 
-            // Tell the others what we have, so they can fill us in.
-            state.restart_heads();
+            // Catch-up starts when the topic is activated (`set_active`).
 
             let publisher: Box<dyn OpPublisher> = Box::new(LogosOpPublisher {
                 inner: self.inner.clone(),
@@ -290,6 +380,27 @@ impl SyncBackend for LogosBackend {
         // unsubscribing; not needed yet.
         Box::pin(async { Ok(()) })
     }
+
+    fn set_active(&self, topic: Topic, active: bool) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            let Ok(state) = self.inner.topic(topic).await else {
+                return;
+            };
+            let was = state.active.swap(active, Ordering::SeqCst);
+            if active && !was {
+                // Tell the others what we have, so they can fill us in.
+                state.restart_heads();
+            }
+        })
+    }
+
+    fn presence_interval(&self) -> Duration {
+        PRESENCE_INTERVAL
+    }
+
+    fn stats(&self) -> Option<TransportStats> {
+        Some(self.inner.stats())
+    }
 }
 
 #[derive(Default)]
@@ -315,6 +426,11 @@ struct TopicState {
     heads_restart: tokio::sync::Notify,
     /// Debounce for heads sent because we noticed we are behind.
     last_behind_heads: StdMutex<Option<Instant>>,
+    /// The user has the topic open: only then do we send heads.
+    active: AtomicBool,
+    counters: StdMutex<Counters>,
+    /// Other devices heard from, and when.
+    peers: StdMutex<HashMap<VerifyingKey, Instant>>,
 }
 
 impl TopicState {
@@ -329,6 +445,10 @@ impl TopicState {
             let cutoff = Instant::now() - Duration::from_secs(60);
             seen.retain(|_, at| *at > cutoff);
         }
+    }
+
+    fn heard_from(&self, peer: VerifyingKey) {
+        self.peers.lock().unwrap().insert(peer, Instant::now());
     }
 
     fn seen_since(&self, hash: &Hash, since: Instant) -> bool {
@@ -358,6 +478,9 @@ impl Inner {
             seen: StdMutex::new(HashMap::new()),
             heads_restart: tokio::sync::Notify::new(),
             last_behind_heads: StdMutex::new(None),
+            active: AtomicBool::new(false),
+            counters: StdMutex::new(Counters::default()),
+            peers: StdMutex::new(HashMap::new()),
         });
 
         // Listen before subscribing, so nothing that arrives is lost.
@@ -374,14 +497,70 @@ impl Inner {
         tokio::spawn(heads_loop(self.clone(), state.clone()));
 
         topics.insert(topic, state.clone());
+        self.topic_list.lock().unwrap().push(state.clone());
         Ok(state)
     }
 
-    async fn send(&self, state: &TopicState, content_topic: &str, frame: &Frame) {
+    fn stats(&self) -> TransportStats {
+        let mut counters = self.counters.lock().unwrap();
+        counters.roll();
+        let now = Instant::now();
+        let mut topics: Vec<TopicStats> = self
+            .topic_list
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|state| {
+                let mut c = state.counters.lock().unwrap();
+                c.roll();
+                let mut peers: Vec<PeerSeen> = state
+                    .peers
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|(key, at)| PeerSeen {
+                        key: key.to_hex(),
+                        seconds_ago: now.duration_since(*at).as_secs(),
+                    })
+                    .collect();
+                peers.sort_by_key(|p| p.seconds_ago);
+                TopicStats {
+                    topic: hex::encode(state.topic.to_bytes()),
+                    active: state.active.load(Ordering::SeqCst),
+                    sent: c.sent.clone(),
+                    sent_this_epoch: c.sent_this_epoch.clone(),
+                    received: c.received.clone(),
+                    peers,
+                }
+            })
+            .collect();
+        topics.sort_by(|a, b| b.active.cmp(&a.active).then(a.topic.cmp(&b.topic)));
+        TransportStats {
+            transport: "logos-delivery".into(),
+            epoch_seconds: RLN_EPOCH_SECONDS,
+            epoch_elapsed: unix_secs() % RLN_EPOCH_SECONDS,
+            uptime: self.started.elapsed().as_secs(),
+            sent: counters.sent.clone(),
+            sent_this_epoch: counters.sent_this_epoch.clone(),
+            sent_last_epoch: counters.sent_last_epoch.clone(),
+            received: counters.received.clone(),
+            topics,
+        }
+    }
+
+    async fn send(&self, state: &TopicState, content_topic: &str, frame: &Frame, kind: Kind) {
         let payload = state.keys.seal(frame);
+        let bytes = payload.len();
+        self.counters.lock().unwrap().sent(kind, bytes);
+        state.counters.lock().unwrap().sent(kind, bytes);
         if let Err(error) = self.bus.publish(content_topic.to_owned(), payload).await {
             warn!("failed to publish on {content_topic}: {error}");
         }
+    }
+
+    fn count_received(&self, state: &TopicState, kind: Kind, bytes: usize) {
+        self.counters.lock().unwrap().received(kind, bytes);
+        state.counters.lock().unwrap().received(kind, bytes);
     }
 
     async fn send_heads(&self, state: &TopicState) {
@@ -403,11 +582,16 @@ impl Inner {
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0),
         };
-        self.send(state, &state.keys.ops_topic, &frame).await;
+        self.send(state, &state.keys.ops_topic, &frame, Kind::Heads)
+            .await;
     }
 
-    /// Send our heads soon because a peer is ahead of us, at most twice a second.
+    /// Send our heads soon because a peer is ahead of us, at most twice a second. Only on an
+    /// active topic: an inactive one catches up when the user opens it.
     async fn send_heads_behind(&self, state: &TopicState) {
+        if !state.active.load(Ordering::SeqCst) {
+            return;
+        }
         {
             let mut last = state.last_behind_heads.lock().unwrap();
             if last.is_some_and(|at| at.elapsed() < Duration::from_millis(500)) {
@@ -471,7 +655,9 @@ impl Inner {
             .map_err(|error| PublishError::Backend(error.to_string()))?;
         state.mark_seen(op.hash);
 
-        self.send(state, &state.keys.ops_topic, &op.frame()).await;
+        let kind = if prune { Kind::Snapshot } else { Kind::Op };
+        self.send(state, &state.keys.ops_topic, &op.frame(), kind)
+            .await;
         Ok(())
     }
 
@@ -587,6 +773,7 @@ impl Inner {
         if from == self.signing_key.verifying_key() {
             return;
         }
+        state.heard_from(from);
 
         let ours = match self.store.heads(&state.topic).await {
             Ok(ours) => ours,
@@ -642,7 +829,9 @@ impl Inner {
                         continue;
                     }
                     state.mark_seen(op.hash);
-                    inner.send(&state, &state.keys.ops_topic, &op.frame()).await;
+                    inner
+                        .send(&state, &state.keys.ops_topic, &op.frame(), Kind::Repair)
+                        .await;
                 }
             }
         });
@@ -657,6 +846,12 @@ impl Inner {
             warn!("dropping undecodable ephemeral message");
             return;
         };
+        state.heard_from(message.author);
+        let kind = match body {
+            EphemeralMessage::AuthorTracker(_) => Kind::Presence,
+            EphemeralMessage::Application(_) => Kind::Cursor,
+        };
+        self.count_received(state, kind, message.body.0.len());
         if let Some(tx) = state.senders.lock().await.ephemeral.as_ref() {
             let _ = tx
                 .send(EphemeralEvent {
@@ -721,31 +916,55 @@ async fn receive_loop(
             debug!("dropping message we can't open");
             continue;
         };
+        let bytes = message.payload.len();
         match frame {
             Frame::Operation { header, body } => {
                 match Op::decode(header.0, body.map(|body| body.0)) {
-                    Some(op) => inner.receive_op(&state, op).await,
+                    Some(op) => {
+                        let kind = if op.prunes() {
+                            Kind::Snapshot
+                        } else {
+                            Kind::Op
+                        };
+                        inner.count_received(&state, kind, bytes);
+                        if op.author() != inner.signing_key.verifying_key() {
+                            state.heard_from(op.author());
+                        }
+                        inner.receive_op(&state, op).await
+                    }
                     None => warn!("dropping undecodable operation"),
                 }
             }
-            Frame::Heads { from, heads, .. } => inner.receive_heads(&state, from, heads).await,
+            Frame::Heads { from, heads, .. } => {
+                if from != inner.signing_key.verifying_key() {
+                    inner.count_received(&state, Kind::Heads, bytes);
+                }
+                inner.receive_heads(&state, from, heads).await
+            }
             Frame::Ephemeral(message) => inner.receive_ephemeral(&state, message).await,
         }
     }
 }
 
+/// Sends heads when the topic is activated (see `HEADS_ON_ACTIVATE`), and never otherwise.
 async fn heads_loop(inner: Arc<Inner>, state: Arc<TopicState>) {
-    let mut interval = HEADS_FIRST_INTERVAL;
     loop {
-        tokio::select! {
-            _ = tokio::time::sleep(interval) => {
+        state.heads_restart.notified().await;
+        'burst: loop {
+            let mut previous = Duration::ZERO;
+            for at in HEADS_ON_ACTIVATE {
+                tokio::select! {
+                    _ = tokio::time::sleep(at - previous) => {}
+                    // Activated again: start over.
+                    _ = state.heads_restart.notified() => continue 'burst,
+                }
+                previous = at;
+                if !state.active.load(Ordering::SeqCst) {
+                    break 'burst;
+                }
                 inner.send_heads(&state).await;
-                interval = (interval * 2).min(HEADS_MAX_INTERVAL);
             }
-            _ = state.heads_restart.notified() => {
-                inner.send_heads(&state).await;
-                interval = HEADS_FIRST_INTERVAL;
-            }
+            break;
         }
     }
 }
@@ -773,6 +992,10 @@ struct LogosEphemeralPublisher {
 impl EphemeralPublisher for LogosEphemeralPublisher {
     fn publish(&self, message: EphemeralMessage) -> BoxFuture<'_, Result<(), PublishError>> {
         Box::pin(async move {
+            let kind = match message {
+                EphemeralMessage::AuthorTracker(_) => Kind::Presence,
+                EphemeralMessage::Application(_) => Kind::Cursor,
+            };
             let body = p2panda_core::cbor::encode_cbor(&message)
                 .map_err(|error| PublishError::Backend(error.to_string()))?;
             let timestamp = SystemTime::now()
@@ -786,6 +1009,7 @@ impl EphemeralPublisher for LogosEphemeralPublisher {
                     &self.state,
                     &self.state.keys.ephemeral_topic,
                     &Frame::Ephemeral(signed),
+                    kind,
                 )
                 .await;
             Ok(())

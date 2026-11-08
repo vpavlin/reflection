@@ -12,9 +12,11 @@
 //! The default backend is p2panda. Other backends are compiled in with cargo features.
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 
 use p2panda::node::CreateStreamError;
 use p2panda::{Hash, Topic, VerifyingKey};
+use serde::Serialize;
 use tokio_stream::Stream;
 
 use crate::ephemeral_message::EphemeralMessage;
@@ -105,4 +107,93 @@ pub(crate) trait SyncBackend: Send + Sync + std::fmt::Debug + 'static {
         &self,
         connection_mode: ConnectionMode,
     ) -> BoxFuture<'_, Result<(), NodeError>>;
+
+    /// Whether the user has this topic open. A backend that pays per message sent (Logos
+    /// Delivery under RLN) publishes nothing of its own for an inactive topic: it still
+    /// receives, and still answers peers who ask for operations it has. Topics start inactive
+    /// in the backend; `TopicStream` activates them.
+    fn set_active(&self, _topic: Topic, _active: bool) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+
+    /// How often presence pings are sent on an active topic. An author is shown offline after
+    /// two intervals without one.
+    fn presence_interval(&self) -> Duration {
+        Duration::from_secs(30)
+    }
+
+    /// Message counters, for backends that pay per message (see `TransportStats`).
+    fn stats(&self) -> Option<TransportStats> {
+        None
+    }
+}
+
+/// Messages a node sent or received, by kind.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct MessageCounts {
+    /// Our own operations (Loro deltas).
+    pub ops: u64,
+    /// Our own operations with the prune flag (Loro snapshots).
+    pub snapshots: u64,
+    /// Catch-up: the heads of our logs.
+    pub heads: u64,
+    /// Operations re-sent to a peer that lacked them.
+    pub repairs: u64,
+    /// Operations from the other network (bridge).
+    pub relayed: u64,
+    /// Presence: hello, ping, bye.
+    pub presence: u64,
+    /// Other ephemeral messages (cursors).
+    pub cursors: u64,
+    /// Bytes on the wire.
+    pub bytes: u64,
+}
+
+impl MessageCounts {
+    pub fn messages(&self) -> u64 {
+        self.ops
+            + self.snapshots
+            + self.heads
+            + self.repairs
+            + self.relayed
+            + self.presence
+            + self.cursors
+    }
+}
+
+/// A peer seen on a topic.
+#[derive(Clone, Debug, Serialize)]
+pub struct PeerSeen {
+    pub key: String,
+    pub seconds_ago: u64,
+}
+
+/// Counters of one topic.
+#[derive(Clone, Debug, Serialize)]
+pub struct TopicStats {
+    /// The topic id, hex.
+    pub topic: String,
+    pub active: bool,
+    pub sent: MessageCounts,
+    pub sent_this_epoch: MessageCounts,
+    pub received: MessageCounts,
+    /// Other devices heard from on this topic, most recent first.
+    pub peers: Vec<PeerSeen>,
+}
+
+/// What a node sent and received, counted the way RLN meters it: messages per epoch of
+/// `epoch_seconds`, epochs aligned to Unix time.
+#[derive(Clone, Debug, Serialize)]
+pub struct TransportStats {
+    pub transport: String,
+    pub epoch_seconds: u64,
+    /// Seconds into the current epoch.
+    pub epoch_elapsed: u64,
+    /// Seconds since the counters started.
+    pub uptime: u64,
+    pub sent: MessageCounts,
+    pub sent_this_epoch: MessageCounts,
+    pub sent_last_epoch: MessageCounts,
+    pub received: MessageCounts,
+    pub topics: Vec<TopicStats>,
 }

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::ops::DerefMut;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -13,8 +14,6 @@ use crate::backend::EphemeralPublisher;
 use crate::ephemeral_message::EphemeralMessage;
 use crate::node::NodeInner;
 use crate::traits::TopicSubscription;
-
-const OFFLINE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -39,23 +38,50 @@ pub struct AuthorTracker<T> {
     subscribable_topic: Arc<T>,
     node: Arc<NodeInner>,
     tx: RwLock<Option<Arc<dyn EphemeralPublisher>>>,
+    /// Whether the user has the topic open. We only announce ourselves on active topics; we
+    /// still track who else is online on all of them.
+    active: AtomicBool,
+    ping_interval: Duration,
 }
 
 impl<T: TopicSubscription> AuthorTracker<T> {
-    pub fn new(node: Arc<NodeInner>, subscribable_topic: Arc<T>) -> Arc<Self> {
+    pub fn new(node: Arc<NodeInner>, subscribable_topic: Arc<T>, active: bool) -> Arc<Self> {
+        let ping_interval = node.backend.presence_interval();
         Arc::new(Self {
             last_ping: Mutex::new(HashMap::new()),
             subscribable_topic,
             node,
             tx: RwLock::new(None),
+            active: AtomicBool::new(active),
+            ping_interval,
         })
+    }
+
+    fn offline_timeout(&self) -> Duration {
+        self.ping_interval * 2
+    }
+
+    /// The user opened (`true`) or closed the topic: say hello or bye.
+    pub async fn set_active(&self, active: bool) {
+        if self.active.load(Ordering::SeqCst) == active {
+            return;
+        }
+        if active {
+            self.active.store(true, Ordering::SeqCst);
+            self.send(AuthorTrackerMessage::Hello).await;
+        } else {
+            self.send(AuthorTrackerMessage::Bye).await;
+            self.active.store(false, Ordering::SeqCst);
+        }
     }
 
     pub async fn set_topic_tx(&self, tx: Option<Arc<dyn EphemeralPublisher>>) {
         let mut tx_guard = self.tx.write().await;
 
         // Send good bye message to the network
-        if let Some(tx) = tx_guard.as_ref() {
+        if let Some(tx) = tx_guard.as_ref()
+            && self.active.load(Ordering::SeqCst)
+        {
             send_message(tx, AuthorTrackerMessage::Bye).await;
         }
 
@@ -93,6 +119,9 @@ impl<T: TopicSubscription> AuthorTracker<T> {
     }
 
     async fn send(&self, message: AuthorTrackerMessage) {
+        if !self.active.load(Ordering::SeqCst) {
+            return;
+        }
         if let Some(tx) = self.tx.read().await.as_ref() {
             send_message(tx, message).await;
         }
@@ -104,7 +133,7 @@ impl<T: TopicSubscription> AuthorTracker<T> {
         self.set_last_seen(author).await;
 
         // Send a ping to the network to ensure that the new author knows we exist
-        // Normally we send a ping every `OFFLINE_TIMEOUT / 2`
+        // Normally we send a ping every `ping_interval`
         self.send(AuthorTrackerMessage::Ping).await;
     }
 
@@ -128,7 +157,7 @@ impl<T: TopicSubscription> AuthorTracker<T> {
         // Send a hello to the network so other authors know we joined the topic
         self.send(AuthorTrackerMessage::Hello).await;
 
-        let mut interval = tokio::time::interval(OFFLINE_TIMEOUT / 2);
+        let mut interval = tokio::time::interval(self.ping_interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // Skip over the first tick which completes immediately
         interval.tick().await;
@@ -138,9 +167,10 @@ impl<T: TopicSubscription> AuthorTracker<T> {
 
             // Send a ping to the network so that we won't be marked as offline
             self.send(AuthorTrackerMessage::Ping).await;
+            let offline_timeout = self.offline_timeout();
             let mut expired = Vec::new();
             self.last_ping.lock().await.retain(|author, instant| {
-                if instant.elapsed() > OFFLINE_TIMEOUT {
+                if instant.elapsed() > offline_timeout {
                     expired.push(*author);
                     false
                 } else {
