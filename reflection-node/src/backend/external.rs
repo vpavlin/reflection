@@ -159,6 +159,61 @@ impl ExternalBackend {
     pub(crate) fn bus(&self) -> &Arc<dyn P2pandaBus> {
         &self.bus
     }
+
+    /// Drop what is known about a topic, so the next stream opens it again (a retry after a
+    /// failed or partial open).
+    pub(crate) fn forget(&self, topic: Topic) {
+        self.topics.lock().unwrap().remove(&topic);
+    }
+}
+
+/// A `P2pandaBus` whose first `fail` opens fail (tests: a host that times out).
+#[cfg(any(test, feature = "test_utils"))]
+pub struct FlakyBus {
+    pub inner: Arc<dyn P2pandaBus>,
+    pub fail: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(any(test, feature = "test_utils"))]
+impl P2pandaBus for FlakyBus {
+    fn open(
+        &self,
+        topic: Topic,
+    ) -> BoxFuture<'_, Result<mpsc::UnboundedReceiver<P2pandaItem>, String>> {
+        use std::sync::atomic::Ordering;
+        if self
+            .fail
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Box::pin(async {
+                Err("call to 'p2panda_core.open' timed out (test)".to_owned())
+            });
+        }
+        self.inner.open(topic)
+    }
+    fn publish(
+        &self,
+        topic: Topic,
+        message: Vec<u8>,
+        prune: bool,
+    ) -> BoxFuture<'_, Result<(), String>> {
+        self.inner.publish(topic, message, prune)
+    }
+    fn ephemeral(&self, topic: Topic, message: Vec<u8>) -> BoxFuture<'_, Result<(), String>> {
+        self.inner.ephemeral(topic, message)
+    }
+    fn set_active(&self, topic: Topic, active: bool) -> BoxFuture<'_, ()> {
+        self.inner.set_active(topic, active)
+    }
+    fn import(
+        &self,
+        topic: Topic,
+        header: Vec<u8>,
+        body: Option<Vec<u8>>,
+    ) -> BoxFuture<'_, Result<(), String>> {
+        self.inner.import(topic, header, body)
+    }
 }
 
 /// An operation item as Reflection's stream event (its message is a CBOR byte string).

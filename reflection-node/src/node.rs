@@ -95,6 +95,9 @@ pub(crate) enum Transport {
     /// a `P2pandaBus`.
     #[cfg(all(feature = "logos", any(test, feature = "test_utils")))]
     DualMemory,
+    /// As DualMemory, but the first `n` p2panda opens fail (the host timing out).
+    #[cfg(all(feature = "logos", any(test, feature = "test_utils")))]
+    DualMemoryFlaky(usize),
 }
 
 /// Start a Logos Delivery node through liblogosdelivery, configured from the environment:
@@ -294,6 +297,22 @@ impl Node {
             network_id.into(),
             db_location,
             Some(Transport::DualMemory),
+        )
+        .await
+    }
+
+    /// As `with_dual_memory`, but the first `fail_opens` opens on p2panda fail.
+    #[cfg(all(feature = "logos", any(test, feature = "test_utils")))]
+    pub async fn with_dual_memory_flaky(
+        signing_key: SigningKey,
+        network_id: impl Into<NetworkId>,
+        fail_opens: usize,
+    ) -> Result<Self, NodeError> {
+        Self::spawn(
+            signing_key,
+            network_id.into(),
+            None,
+            Some(Transport::DualMemoryFlaky(fail_opens)),
         )
         .await
     }
@@ -538,6 +557,16 @@ impl NodeInner {
                     Arc::new(crate::backend::external::NodeBus::new(node)),
                 )
             }
+            Transport::DualMemoryFlaky(fail) => {
+                let node = p2panda_node(signing_key.clone(), network_id, pool.clone()).await?;
+                Transport::Dual(
+                    Arc::new(crate::logos::MemoryBus::new()),
+                    Arc::new(crate::backend::external::FlakyBus {
+                        inner: Arc::new(crate::backend::external::NodeBus::new(node)),
+                        fail: std::sync::atomic::AtomicUsize::new(fail),
+                    }),
+                )
+            }
             other => other,
         };
 
@@ -556,7 +585,7 @@ impl NodeInner {
                 )
             }
             #[cfg(all(feature = "logos", any(test, feature = "test_utils")))]
-            Transport::DualMemory => unreachable!("replaced above"),
+            Transport::DualMemory | Transport::DualMemoryFlaky(_) => unreachable!("replaced above"),
             #[cfg(feature = "logos")]
             Transport::Dual(delivery, p2panda) => {
                 info!("syncing over Logos Delivery and the host's p2panda node");

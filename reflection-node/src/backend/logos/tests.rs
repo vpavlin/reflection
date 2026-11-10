@@ -629,3 +629,70 @@ async fn dual_node_joins_p2panda_and_logos() {
     dual.shutdown().await.unwrap();
     on_logos.shutdown().await.unwrap();
 }
+
+/// On both networks, the host's p2panda node failing to open the topic (a busy host timing out)
+/// must not take the topic off Logos: Logos works at once, and p2panda joins after a retry.
+#[tokio::test(flavor = "multi_thread")]
+#[test_log::test]
+async fn dual_node_keeps_logos_when_p2panda_open_fails() {
+    let topic = random_topic();
+    let on_p2panda = Node::with_p2panda(SigningKey::generate(), network(), None)
+        .await
+        .unwrap();
+    // The first open on p2panda fails; the retry comes 5 s later.
+    let dual = Node::with_dual_memory_flaky(SigningKey::generate(), network(), 1)
+        .await
+        .unwrap();
+    let on_logos = node(None).await;
+
+    let p2panda_doc = Recorder::default();
+    let logos_doc = Recorder::default();
+    let dual_doc = Recorder::default();
+    let p2panda_stream = on_p2panda.stream(topic, p2panda_doc.clone()).await.unwrap();
+    let dual_stream = dual.stream(topic, dual_doc.clone()).await.unwrap();
+    let logos_stream = on_logos.stream(topic, logos_doc.clone()).await.unwrap();
+
+    let wait = |doc: Recorder, want: &'static [u8], tries: usize| async move {
+        for _ in 0..tries {
+            if doc.received().iter().any(|m| m == want) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    };
+
+    // Before p2panda is open: the dual node publishes, and Logos gets it right away.
+    dual_stream
+        .publish_delta(b"while p2panda is down".to_vec())
+        .await
+        .unwrap();
+    logos_stream
+        .publish_delta(b"from logos".to_vec())
+        .await
+        .unwrap();
+    assert!(
+        wait(logos_doc.clone(), b"while p2panda is down", 60).await,
+        "Logos must not wait for p2panda"
+    );
+    assert!(wait(dual_doc.clone(), b"from logos", 60).await);
+
+    // After the retry, p2panda catches up with what was held, and both directions work.
+    p2panda_stream
+        .publish_delta(b"from p2panda".to_vec())
+        .await
+        .unwrap();
+    assert!(
+        wait(p2panda_doc.clone(), b"while p2panda is down", 1200).await,
+        "p2panda never got the held edit"
+    );
+    assert!(wait(p2panda_doc.clone(), b"from logos", 1200).await);
+    assert!(
+        wait(logos_doc.clone(), b"from p2panda", 1200).await,
+        "Logos never got the p2panda edit"
+    );
+
+    on_p2panda.shutdown().await.unwrap();
+    dual.shutdown().await.unwrap();
+    on_logos.shutdown().await.unwrap();
+}
