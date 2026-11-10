@@ -100,14 +100,12 @@ impl SyncBackend for BridgeBackend {
         Box::pin(async move {
             let (p2panda_publisher, p2panda_events) = self.p2panda.ephemeral_stream(topic).await?;
             let (logos_publisher, logos_events) = self.logos.ephemeral_stream(topic).await?;
-            let publisher: Box<dyn EphemeralPublisher> = Box::new(BothEphemeral {
-                p2panda: p2panda_publisher,
-                logos: logos_publisher,
-                pings: AtomicU64::new(0),
-                logos_ping_every: (self.logos.presence_interval().as_secs()
-                    / self.p2panda.presence_interval().as_secs().max(1))
-                .max(1),
-            });
+            let publisher: Box<dyn EphemeralPublisher> = Box::new(BothEphemeral::new(
+                p2panda_publisher,
+                logos_publisher,
+                self.p2panda.presence_interval(),
+                self.logos.presence_interval(),
+            ));
             Ok((publisher, Box::pin(p2panda_events.merge(logos_events)) as _))
         })
     }
@@ -131,12 +129,29 @@ impl SyncBackend for BridgeBackend {
     }
 }
 
-struct BothEphemeral {
+/// Ephemeral messages to both networks: presence is paced for p2panda, and only every n-th
+/// ping goes to Logos (which charges per message).
+pub(crate) struct BothEphemeral {
     p2panda: Box<dyn EphemeralPublisher>,
     logos: Box<dyn EphemeralPublisher>,
     pings: AtomicU64,
-    /// Presence is paced for p2panda; only every n-th ping goes to Logos.
     logos_ping_every: u64,
+}
+
+impl BothEphemeral {
+    pub(crate) fn new(
+        p2panda: Box<dyn EphemeralPublisher>,
+        logos: Box<dyn EphemeralPublisher>,
+        p2panda_interval: std::time::Duration,
+        logos_interval: std::time::Duration,
+    ) -> Self {
+        Self {
+            p2panda,
+            logos,
+            pings: AtomicU64::new(0),
+            logos_ping_every: (logos_interval.as_secs() / p2panda_interval.as_secs().max(1)).max(1),
+        }
+    }
 }
 
 impl EphemeralPublisher for BothEphemeral {

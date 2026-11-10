@@ -78,7 +78,7 @@ fn stream_error(error: logos_p2panda::Error) -> CreateStreamError {
     CreateStreamError(error.to_string())
 }
 
-fn op_event(op: &Op) -> Option<OpEvent> {
+pub(crate) fn op_event(op: &Op) -> Option<OpEvent> {
     let body = match op.body.as_deref() {
         None => Vec::new(),
         Some(bytes) => match p2panda_core::cbor::decode_cbor::<Vec<u8>, _>(bytes) {

@@ -35,6 +35,10 @@ pub enum P2pandaItem {
         author: VerifyingKey,
         /// The message, CBOR-encoded.
         message: Vec<u8>,
+        /// The whole signed operation, as encoded on the wire: its header and its body. Needed
+        /// to pass the operation on to another network unchanged (`DualBackend`); a host that
+        /// doesn't provide it can't do that.
+        signed: Option<(Vec<u8>, Option<Vec<u8>>)>,
     },
     /// An ephemeral message from another node.
     Ephemeral {
@@ -68,6 +72,18 @@ pub trait P2pandaBus: Send + Sync + 'static {
     /// Whether the user has the topic open.
     fn set_active(&self, _topic: Topic, _active: bool) -> BoxFuture<'_, ()> {
         Box::pin(async {})
+    }
+
+    /// Hand the node a signed operation from elsewhere (another network), by its encoded header
+    /// and body. The node checks and stores it, syncs it to its peers and delivers it on the
+    /// topic like any other. The topic must be open.
+    fn import(
+        &self,
+        _topic: Topic,
+        _header: Vec<u8>,
+        _body: Option<Vec<u8>>,
+    ) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async { Err("this p2panda node can't import operations".to_owned()) })
     }
 }
 
@@ -125,35 +141,54 @@ impl ExternalBackend {
     }
 }
 
+impl ExternalBackend {
+    /// What the host delivers for a topic's operations, undecoded (for `DualBackend`).
+    pub(crate) async fn raw_ops(
+        &self,
+        topic: Topic,
+    ) -> Result<mpsc::UnboundedReceiver<P2pandaItem>, CreateStreamError> {
+        self.split(topic).await?;
+        self.topics
+            .lock()
+            .unwrap()
+            .get_mut(&topic)
+            .and_then(|split| split.ops.take())
+            .ok_or_else(|| CreateStreamError("topic already streamed".into()))
+    }
+
+    pub(crate) fn bus(&self) -> &Arc<dyn P2pandaBus> {
+        &self.bus
+    }
+}
+
+/// An operation item as Reflection's stream event (its message is a CBOR byte string).
+pub(crate) fn item_event(item: P2pandaItem) -> Option<OpEvent> {
+    match item {
+        P2pandaItem::Operation {
+            hash,
+            author,
+            message,
+            ..
+        } => match p2panda_core::cbor::decode_cbor::<Vec<u8>, _>(&message[..]) {
+            Ok(body) => Some(OpEvent::Operation {
+                id: hash,
+                author,
+                body,
+            }),
+            Err(error) => {
+                warn!(%hash, "dropping operation with undecodable message: {error}");
+                None
+            }
+        },
+        P2pandaItem::Ephemeral { .. } => None,
+    }
+}
+
 impl SyncBackend for ExternalBackend {
     fn stream(&self, topic: Topic) -> BoxFuture<'_, Result<OpStream, CreateStreamError>> {
         Box::pin(async move {
-            self.split(topic).await?;
-            let rx = self
-                .topics
-                .lock()
-                .unwrap()
-                .get_mut(&topic)
-                .and_then(|split| split.ops.take())
-                .ok_or_else(|| CreateStreamError("topic already streamed".into()))?;
-            let events = UnboundedReceiverStream::new(rx).filter_map(|item| match item {
-                P2pandaItem::Operation {
-                    hash,
-                    author,
-                    message,
-                } => match p2panda_core::cbor::decode_cbor::<Vec<u8>, _>(&message[..]) {
-                    Ok(body) => Some(OpEvent::Operation {
-                        id: hash,
-                        author,
-                        body,
-                    }),
-                    Err(error) => {
-                        warn!(%hash, "dropping operation with undecodable message: {error}");
-                        None
-                    }
-                },
-                P2pandaItem::Ephemeral { .. } => None,
-            });
+            let rx = self.raw_ops(topic).await?;
+            let events = UnboundedReceiverStream::new(rx).filter_map(item_event);
             let publisher: Box<dyn OpPublisher> = Box::new(ExternalOpPublisher {
                 bus: self.bus.clone(),
                 topic,
@@ -273,6 +308,7 @@ pub struct NodeBus {
 struct NodeTopic {
     ops: p2panda::streams::StreamPublisher<ciborium::Value>,
     ephemeral: p2panda::streams::EphemeralStreamPublisher<ciborium::Value>,
+    imports: mpsc::UnboundedSender<p2panda::operation::Operation>,
 }
 
 #[cfg(any(test, feature = "test_utils"))]
@@ -315,10 +351,16 @@ impl P2pandaBus for NodeBus {
             tokio::spawn(async move {
                 while let Some(event) = events.next().await {
                     if let StreamEvent::Processed { operation, .. } = event {
+                        let processed = operation.processed();
+                        let signed = Some((
+                            processed.header().to_bytes(),
+                            processed.body().map(|body| body.to_bytes()),
+                        ));
                         let _ = ops_tx.send(P2pandaItem::Operation {
                             hash: operation.id(),
                             author: operation.author(),
                             message: cbor(operation.message()),
+                            signed,
                         });
                         let _ = operation.ack().await;
                     }
@@ -333,10 +375,18 @@ impl P2pandaBus for NodeBus {
                     });
                 }
             });
-            self.publishers
-                .lock()
+            let (imports, imported) = mpsc::unbounded_channel();
+            ops.import(UnboundedReceiverStream::new(imported))
                 .await
-                .insert(topic, NodeTopic { ops, ephemeral });
+                .map_err(|e| e.to_string())?;
+            self.publishers.lock().await.insert(
+                topic,
+                NodeTopic {
+                    ops,
+                    ephemeral,
+                    imports,
+                },
+            );
             Ok(rx)
         })
     }
@@ -373,6 +423,26 @@ impl P2pandaBus for NodeBus {
                 .publish(value)
                 .await
                 .map_err(|e| e.to_string())
+        })
+    }
+
+    fn import(
+        &self,
+        topic: Topic,
+        header: Vec<u8>,
+        body: Option<Vec<u8>>,
+    ) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            let header: p2panda::operation::Header =
+                p2panda_core::cbor::decode_cbor(&header[..]).map_err(|e| e.to_string())?;
+            let operation = p2panda::operation::Operation {
+                hash: header.hash(),
+                header,
+                body: body.as_deref().map(p2panda_core::Body::new),
+            };
+            let publishers = self.publishers.lock().await;
+            let topic = publishers.get(&topic).ok_or("topic not open")?;
+            topic.imports.send(operation).map_err(|e| e.to_string())
         })
     }
 }

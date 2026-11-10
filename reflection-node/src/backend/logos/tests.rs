@@ -550,3 +550,82 @@ async fn pretend_budget_blocks_what_rln_would_drop() {
 
     alice.shutdown().await.unwrap();
 }
+
+/// A node on both networks with p2panda run by the host (`DualBackend`, as Basecamp's
+/// reflection_core with networks "both"): a p2panda-only node and a Logos-only node, joined only
+/// through it, see each other's edits exactly once, and its own edits reach both.
+#[tokio::test(flavor = "multi_thread")]
+#[test_log::test]
+async fn dual_node_joins_p2panda_and_logos() {
+    let topic = random_topic();
+
+    let on_p2panda = Node::with_p2panda(SigningKey::generate(), network(), None)
+        .await
+        .unwrap();
+    let dual = Node::with_dual_memory(SigningKey::generate(), network(), None)
+        .await
+        .unwrap();
+    let on_logos = node(None).await;
+
+    let p2panda_doc = Recorder::default();
+    let logos_doc = Recorder::default();
+    let dual_doc = Recorder::default();
+    let p2panda_stream = on_p2panda.stream(topic, p2panda_doc.clone()).await.unwrap();
+    let dual_stream = dual.stream(topic, dual_doc.clone()).await.unwrap();
+    let logos_stream = on_logos.stream(topic, logos_doc.clone()).await.unwrap();
+
+    p2panda_stream
+        .publish_delta(b"from p2panda".to_vec())
+        .await
+        .unwrap();
+    logos_stream
+        .publish_delta(b"from logos".to_vec())
+        .await
+        .unwrap();
+    dual_stream
+        .publish_delta(b"from dual".to_vec())
+        .await
+        .unwrap();
+
+    let wait = |doc: Recorder, want: &'static [u8]| async move {
+        for _ in 0..1200 {
+            if doc.received().iter().any(|m| m == want) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    };
+    assert!(
+        wait(logos_doc.clone(), b"from p2panda").await,
+        "Logos side never got the p2panda edit"
+    );
+    assert!(
+        wait(p2panda_doc.clone(), b"from logos").await,
+        "p2panda side never got the Logos edit"
+    );
+    assert!(
+        wait(logos_doc.clone(), b"from dual").await,
+        "Logos never got the dual node's edit"
+    );
+    assert!(
+        wait(p2panda_doc.clone(), b"from dual").await,
+        "p2panda never got the dual node's edit"
+    );
+    assert!(wait(dual_doc.clone(), b"from logos").await);
+    assert!(wait(dual_doc.clone(), b"from p2panda").await);
+
+    // Settle, then: each side sees each operation once.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let count = |doc: &Recorder, want: &[u8]| doc.received().iter().filter(|m| *m == want).count();
+    assert_eq!(count(&logos_doc, b"from p2panda"), 1);
+    assert_eq!(count(&logos_doc, b"from dual"), 1);
+    assert_eq!(count(&p2panda_doc, b"from logos"), 1);
+    assert_eq!(count(&p2panda_doc, b"from dual"), 1);
+    assert_eq!(count(&dual_doc, b"from logos"), 1);
+    assert_eq!(count(&dual_doc, b"from p2panda"), 1);
+
+    on_p2panda.shutdown().await.unwrap();
+    dual.shutdown().await.unwrap();
+    on_logos.shutdown().await.unwrap();
+}

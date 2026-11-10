@@ -55,7 +55,8 @@ pub enum NodeError {
 ///
 /// - `p2panda` (default): p2panda over iroh;
 /// - `logos-memory` / `logos`: the Logos protocol over an in-process bus / Logos Delivery;
-/// - `bridge-memory` / `bridge`: both p2panda and Logos, relaying between them (bridge.rs).
+/// - `bridge-memory` / `bridge`: both p2panda and Logos, relaying between them (bridge.rs);
+/// - `dual-memory` (tests): both, with p2panda through a `P2pandaBus` (dual.rs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BackendChoice {
     P2panda,
@@ -70,6 +71,9 @@ enum BackendChoice {
     /// p2panda through the `P2pandaBus` of an in-process node (tests the external backend).
     #[cfg(any(test, feature = "test_utils"))]
     P2pandaExternal,
+    /// Both networks: Logos on the in-process bus, p2panda through a `P2pandaBus` (dual.rs).
+    #[cfg(all(feature = "logos", any(test, feature = "test_utils")))]
+    DualMemory,
 }
 
 #[cfg(feature = "logos")]
@@ -84,6 +88,13 @@ pub(crate) enum Transport {
     Bridge(ExternalBus),
     /// A p2panda node run by the host.
     External(Arc<dyn crate::external::P2pandaBus>),
+    /// Both networks: Logos Delivery and a p2panda node run by the host.
+    #[cfg(feature = "logos")]
+    Dual(ExternalBus, Arc<dyn crate::external::P2pandaBus>),
+    /// Both networks, for tests: the in-process Logos bus and an in-process p2panda node behind
+    /// a `P2pandaBus`.
+    #[cfg(all(feature = "logos", any(test, feature = "test_utils")))]
+    DualMemory,
 }
 
 /// Start a Logos Delivery node through liblogosdelivery, configured from the environment:
@@ -158,6 +169,8 @@ fn backend_choice() -> Result<BackendChoice, String> {
         "bridge" => Ok(BackendChoice::Bridge),
         #[cfg(any(test, feature = "test_utils"))]
         "p2panda-external" => Ok(BackendChoice::P2pandaExternal),
+        #[cfg(all(feature = "logos", any(test, feature = "test_utils")))]
+        "dual-memory" => Ok(BackendChoice::DualMemory),
         other => Err(format!(
             "REFLECTION_BACKEND={other} is not available in this build"
         )),
@@ -244,6 +257,43 @@ impl Node {
             network_id.into(),
             db_location,
             Some(Transport::Bridge(bus)),
+        )
+        .await
+    }
+
+    /// Create a node on both networks, whatever `REFLECTION_BACKEND` says: Logos Delivery through
+    /// `delivery` and the host's p2panda node through `p2panda` (which must sign with
+    /// `signing_key`). Operations are written once and passed between the networks (dual.rs).
+    #[cfg(feature = "logos")]
+    pub async fn with_dual(
+        signing_key: SigningKey,
+        network_id: impl Into<NetworkId>,
+        db_location: Option<&Path>,
+        delivery: Arc<dyn crate::logos::DeliveryBus>,
+        p2panda: Arc<dyn crate::external::P2pandaBus>,
+    ) -> Result<Self, NodeError> {
+        Self::spawn(
+            signing_key,
+            network_id.into(),
+            db_location,
+            Some(Transport::Dual(delivery, p2panda)),
+        )
+        .await
+    }
+
+    /// Create a node on both networks for tests: the in-process Logos bus, and p2panda through
+    /// a `P2pandaBus` over an in-process p2panda node.
+    #[cfg(all(feature = "logos", any(test, feature = "test_utils")))]
+    pub async fn with_dual_memory(
+        signing_key: SigningKey,
+        network_id: impl Into<NetworkId>,
+        db_location: Option<&Path>,
+    ) -> Result<Self, NodeError> {
+        Self::spawn(
+            signing_key,
+            network_id.into(),
+            db_location,
+            Some(Transport::DualMemory),
         )
         .await
     }
@@ -475,7 +525,20 @@ impl NodeInner {
                     let node = p2panda_node(signing_key.clone(), network_id, pool.clone()).await?;
                     Transport::External(Arc::new(crate::backend::external::NodeBus::new(node)))
                 }
+                #[cfg(all(feature = "logos", any(test, feature = "test_utils")))]
+                BackendChoice::DualMemory => Transport::DualMemory,
             },
+        };
+        #[cfg(all(feature = "logos", any(test, feature = "test_utils")))]
+        let transport = match transport {
+            Transport::DualMemory => {
+                let node = p2panda_node(signing_key.clone(), network_id, pool.clone()).await?;
+                Transport::Dual(
+                    Arc::new(crate::logos::MemoryBus::new()),
+                    Arc::new(crate::backend::external::NodeBus::new(node)),
+                )
+            }
+            other => other,
         };
 
         let backend: Box<dyn SyncBackend> = match transport {
@@ -491,6 +554,23 @@ impl NodeInner {
                     crate::backend::logos::LogosBackend::new(bus, signing_key, network_id, pool)
                         .await?,
                 )
+            }
+            #[cfg(all(feature = "logos", any(test, feature = "test_utils")))]
+            Transport::DualMemory => unreachable!("replaced above"),
+            #[cfg(feature = "logos")]
+            Transport::Dual(delivery, p2panda) => {
+                info!("syncing over Logos Delivery and the host's p2panda node");
+                let logos = crate::backend::logos::LogosBackend::new(
+                    delivery,
+                    signing_key,
+                    network_id,
+                    pool,
+                )
+                .await?;
+                Box::new(crate::backend::dual::DualBackend::new(
+                    crate::backend::external::ExternalBackend::new(p2panda),
+                    logos,
+                ))
             }
             #[cfg(feature = "logos")]
             Transport::Bridge(bus) => {

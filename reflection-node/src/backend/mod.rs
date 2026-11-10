@@ -26,6 +26,8 @@ use crate::traits::TopicSubscriptionError;
 
 #[cfg(feature = "logos")]
 pub(crate) mod bridge;
+#[cfg(feature = "logos")]
+pub(crate) mod dual;
 pub(crate) mod external;
 #[cfg(feature = "logos")]
 pub(crate) mod logos;
