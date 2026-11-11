@@ -402,7 +402,8 @@ async fn background_topics_publish_nothing() {
 
     // Opening it announces him: presence, and heads so he catches up.
     bob_stream.set_active(true).await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // The first heads of the activation burst goes out after 2 s.
+    tokio::time::sleep(Duration::from_secs(3)).await;
     let bob_sent = sent(&bob);
     assert_eq!(bob_sent.presence, 1, "{bob_sent:?}");
     assert_eq!(bob_sent.heads, 1, "{bob_sent:?}");
@@ -418,8 +419,8 @@ async fn heads_are_not_sent_periodically() {
     let alice = node(None).await;
     let _alice_stream = alice.stream(topic, Recorder::default()).await.unwrap();
 
-    // 0.5 s and 5 s after opening; the last one is at 30 s, then nothing.
-    tokio::time::sleep(Duration::from_secs(7)).await;
+    // 2 s and 10 s after opening; the last one of the burst is at 30 s.
+    tokio::time::sleep(Duration::from_secs(11)).await;
     assert_eq!(sent(&alice).heads, 2, "{:?}", sent(&alice));
 
     alice.shutdown().await.unwrap();
@@ -465,7 +466,10 @@ async fn background_peer_still_answers_catch_up() {
     assert_eq!(carol_doc.wait_for(1).await, vec![b"from alice".to_vec()]);
     let bob_sent = sent(&bob);
     assert_eq!(bob_sent.repairs, 1, "{bob_sent:?}");
-    assert_eq!(bob_sent.heads + bob_sent.presence, 0, "{bob_sent:?}");
+    // He doesn't announce himself; after the repair he sends his heads once, so Carol knows
+    // what she should now have.
+    assert_eq!(bob_sent.presence, 0, "{bob_sent:?}");
+    assert_eq!(bob_sent.heads, 1, "{bob_sent:?}");
 
     bob.shutdown().await.unwrap();
     carol.shutdown().await.unwrap();
@@ -763,7 +767,7 @@ async fn lost_catch_up_is_asked_for_again_while_the_note_is_open() {
         .unwrap();
 
     // Bob opens the note, but every operation sent to him in the first 31.5 s is lost: the
-    // answers to all three heads of the activation burst (0.5 s, 5 s, 30 s).
+    // answers to all three heads of the activation burst (2 s, 10 s, 30 s).
     let (ops_topic, _) = logos_p2panda::content_topics(&network().into(), &topic);
     let lose_until = std::time::Instant::now() + Duration::from_millis(31_500);
     let bob_bus = LossyBus::new(ops_topic, lose_until);
@@ -796,7 +800,7 @@ async fn open_note_greets_a_new_peer_and_reports_who_lacks_what() {
     let alice = node(None).await;
     let alice_stream = alice.stream(topic, Recorder::default()).await.unwrap();
     alice_stream.publish_delta(b"hello".to_vec()).await.unwrap();
-    // Past her activation burst's first two heads.
+    // Past her activation burst's first heads (2 s).
     tokio::time::sleep(Duration::from_secs(6)).await;
     let heads_before = alice.transport_stats().unwrap().sent.heads;
 
@@ -812,7 +816,8 @@ async fn open_note_greets_a_new_peer_and_reports_who_lacks_what() {
         .unwrap();
     let bob_doc = Recorder::default();
     let _bob_stream = bob.stream(topic, bob_doc.clone()).await.unwrap();
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Past his first heads (2 s), before her burst's 10 s heads.
+    tokio::time::sleep(Duration::from_millis(2_800)).await;
 
     let stats = alice.transport_stats().unwrap();
     assert_eq!(stats.sent.heads, heads_before + 1, "{:?}", stats.sent);
@@ -820,7 +825,7 @@ async fn open_note_greets_a_new_peer_and_reports_who_lacks_what() {
     assert_eq!(t.peers_missing_ours, 1, "{t:?}");
     assert!(!t.behind, "{t:?}");
 
-    // Her greeting and her repair were lost on his side. His next heads (the 5 s one) bring it, and then nothing is missing anywhere.
+    // Her greeting and her repair were lost on his side. His next heads (the 10 s one) bring it, and then nothing is missing anywhere.
     assert_eq!(bob_doc.wait_for(1).await, vec![b"hello".to_vec()]);
     tokio::time::sleep(Duration::from_millis(500)).await;
     let t = &bob.transport_stats().unwrap().topics[0];

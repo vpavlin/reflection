@@ -54,9 +54,12 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// the first copy is lost, and then not again until the topic is next activated. Gaps found
 /// while active are asked for at once (`send_heads_behind`). Nothing is sent periodically:
 /// under RLN every message counts, and a topic nobody looks at needs no catch-up.
+///
+/// The first waits 2 s: a transport may still be joining the topic's content topics (and the
+/// relay mesh forming) right after subscribing, and an answer arriving before that is lost.
 const HEADS_ON_ACTIVATE: [Duration; 3] = [
-    Duration::from_millis(500),
-    Duration::from_secs(5),
+    Duration::from_secs(2),
+    Duration::from_secs(10),
     Duration::from_secs(30),
 ];
 
@@ -291,8 +294,8 @@ pub struct Config {
     pub catch_up_retry_max: Duration,
     /// A peer's `heads` is answered at most once per this window. Anyone with the topic id can
     /// send `heads` (or replay an old one), and each answer is paid from this device's RLN
-    /// budget. Shorter than the gap between the activation burst's heads (25 s < 30 s - 0.5 s),
-    /// so that each of them can be answered.
+    /// budget. Shorter than the gaps between the activation burst's heads (7 s < 8 s), so that
+    /// each of them can be answered.
     pub repair_answer_window: Duration,
 }
 
@@ -303,7 +306,7 @@ impl Default for Config {
             repair_cap_per_topic: Some(50),
             catch_up_retry: Some(Duration::from_secs(60)),
             catch_up_retry_max: Duration::from_secs(RLN_EPOCH_SECONDS),
-            repair_answer_window: Duration::from_secs(25),
+            repair_answer_window: Duration::from_secs(7),
         }
     }
 }
@@ -815,6 +818,11 @@ impl Inner {
         if !state.active.load(Ordering::SeqCst) {
             return;
         }
+        self.send_heads_throttled(state).await;
+    }
+
+    /// Our heads, at most once per `GREET_WINDOW` per topic.
+    async fn send_heads_throttled(&self, state: &TopicState) {
         {
             let mut last = state.last_greet.lock().unwrap();
             if last.is_some_and(|at| at.elapsed() < GREET_WINDOW) {
@@ -1081,6 +1089,10 @@ impl Inner {
                         .await;
                 }
             }
+            // Then our heads, so the peer knows what it should now have: it shows that it is
+            // catching up, and asks again if part of the repair was lost. Even from a topic
+            // nobody has open here; at most once per `GREET_WINDOW`.
+            inner.send_heads_throttled(&state).await;
         });
     }
 
