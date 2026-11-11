@@ -58,10 +58,18 @@ impl LogosBackend {
         network_id: NetworkId,
         pool: SqlitePool,
     ) -> Result<Self, NodeError> {
-        let config = Config {
+        #[allow(unused_mut)]
+        let mut config = Config {
             classify_ephemeral: Arc::new(classify),
             ..Config::default()
         };
+        // Tests can't wait minutes for a catch-up retry.
+        #[cfg(test)]
+        {
+            config.catch_up_retry = Some(Duration::from_secs(1));
+            config.catch_up_retry_max = Duration::from_secs(2);
+            config.repair_answer_window = Duration::from_secs(2);
+        }
         let sync = LogosSync::new(bus, signing_key, network_id, pool, config)
             .await
             .map_err(|error| NodeError::Backend(error.to_string()))?;
@@ -214,6 +222,9 @@ pub(crate) fn transport_stats(s: logos_p2panda::Stats) -> TransportStats {
                         seconds_ago: p.seconds_ago,
                     })
                     .collect(),
+                waiting: t.waiting,
+                behind: t.behind,
+                peers_missing_ours: t.peers_missing_ours,
             })
             .collect(),
         budget: s.budget,

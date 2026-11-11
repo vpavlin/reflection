@@ -696,3 +696,136 @@ async fn dual_node_keeps_logos_when_p2panda_open_fails() {
     dual.shutdown().await.unwrap();
     on_logos.shutdown().await.unwrap();
 }
+
+/// A `MemoryBus` that loses every incoming message on one content topic until `until`, as a slow,
+/// lossy network does.
+struct LossyBus {
+    inner: MemoryBus,
+    tx: tokio::sync::broadcast::Sender<crate::logos::BusMessage>,
+}
+
+impl LossyBus {
+    fn new(lose: String, until: std::time::Instant) -> Arc<Self> {
+        let inner = MemoryBus::new();
+        let (tx, _) = tokio::sync::broadcast::channel(4096);
+        let mut rx = crate::logos::DeliveryBus::messages(&inner);
+        let forward = tx.clone();
+        tokio::spawn(async move {
+            while let Ok(message) = rx.recv().await {
+                if message.content_topic == lose && std::time::Instant::now() < until {
+                    continue;
+                }
+                let _ = forward.send(message);
+            }
+        });
+        Arc::new(Self { inner, tx })
+    }
+}
+
+impl crate::logos::DeliveryBus for LossyBus {
+    fn subscribe(
+        &self,
+        content_topic: String,
+    ) -> logos_p2panda::BoxFuture<'_, Result<(), crate::logos::BusError>> {
+        self.inner.subscribe(content_topic)
+    }
+    fn unsubscribe(
+        &self,
+        content_topic: String,
+    ) -> logos_p2panda::BoxFuture<'_, Result<(), crate::logos::BusError>> {
+        self.inner.unsubscribe(content_topic)
+    }
+    fn publish(
+        &self,
+        content_topic: String,
+        payload: Vec<u8>,
+    ) -> logos_p2panda::BoxFuture<'_, Result<(), crate::logos::BusError>> {
+        self.inner.publish(content_topic, payload)
+    }
+    fn messages(&self) -> tokio::sync::broadcast::Receiver<crate::logos::BusMessage> {
+        self.tx.subscribe()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[test_log::test]
+async fn lost_catch_up_is_asked_for_again_while_the_note_is_open() {
+    let topic = random_topic();
+    let alice = node(None).await;
+    let alice_stream = alice
+        .stream_in_background(topic, Recorder::default())
+        .await
+        .unwrap();
+    alice_stream.publish_delta(b"title".to_vec()).await.unwrap();
+    alice_stream
+        .publish_delta(b"the whole text".to_vec())
+        .await
+        .unwrap();
+
+    // Bob opens the note, but every operation sent to him in the first 31.5 s is lost: the
+    // answers to all three heads of the activation burst (0.5 s, 5 s, 30 s).
+    let (ops_topic, _) = logos_p2panda::content_topics(&network().into(), &topic);
+    let lose_until = std::time::Instant::now() + Duration::from_millis(31_500);
+    let bob_bus = LossyBus::new(ops_topic, lose_until);
+    let bob = Node::with_delivery_bus(SigningKey::generate(), network(), None, bob_bus)
+        .await
+        .unwrap();
+    let bob_doc = Recorder::default();
+    let _bob_stream = bob.stream(topic, bob_doc.clone()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(30_800)).await;
+    assert!(bob_doc.received().is_empty());
+    let stats = bob.transport_stats().unwrap();
+    assert_eq!(stats.sent.heads, 3, "{:?}", stats.sent);
+
+    // Still open: Bob asks again, and gets both.
+    assert_eq!(
+        bob_doc.wait_for(2).await,
+        vec![b"title".to_vec(), b"the whole text".to_vec()]
+    );
+    let stats = bob.transport_stats().unwrap();
+    assert!(stats.sent.heads >= 4, "{:?}", stats.sent);
+
+    alice.shutdown().await.unwrap();
+    bob.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[test_log::test]
+async fn open_note_greets_a_new_peer_and_reports_who_lacks_what() {
+    let topic = random_topic();
+    let alice = node(None).await;
+    let alice_stream = alice.stream(topic, Recorder::default()).await.unwrap();
+    alice_stream.publish_delta(b"hello".to_vec()).await.unwrap();
+    // Past her activation burst's first two heads.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let heads_before = alice.transport_stats().unwrap().sent.heads;
+
+    // Bob opens the note; he loses every operation for 3 s. Alice hears his presence and his
+    // heads (which lack hers) and greets him with hers.
+    let (ops_topic, _) = logos_p2panda::content_topics(&network().into(), &topic);
+    let bob_bus = LossyBus::new(
+        ops_topic,
+        std::time::Instant::now() + Duration::from_secs(3),
+    );
+    let bob = Node::with_delivery_bus(SigningKey::generate(), network(), None, bob_bus)
+        .await
+        .unwrap();
+    let bob_doc = Recorder::default();
+    let _bob_stream = bob.stream(topic, bob_doc.clone()).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let stats = alice.transport_stats().unwrap();
+    assert_eq!(stats.sent.heads, heads_before + 1, "{:?}", stats.sent);
+    let t = &stats.topics[0];
+    assert_eq!(t.peers_missing_ours, 1, "{t:?}");
+    assert!(!t.behind, "{t:?}");
+
+    // Her greeting and her repair were lost on his side. His next heads (the 5 s one) bring it, and then nothing is missing anywhere.
+    assert_eq!(bob_doc.wait_for(1).await, vec![b"hello".to_vec()]);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let t = &bob.transport_stats().unwrap().topics[0];
+    assert!(!t.behind, "{t:?}");
+
+    alice.shutdown().await.unwrap();
+    bob.shutdown().await.unwrap();
+}

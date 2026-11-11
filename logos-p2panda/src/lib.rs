@@ -67,9 +67,12 @@ pub const RLN_EPOCH_SECONDS: u64 = 600;
 const REPAIR_DELAY_MIN_MS: u64 = 50;
 const REPAIR_DELAY_MAX_MS: u64 = 500;
 
-/// A peer's `heads` is answered at most once per this window. Anyone with the topic id can send
-/// `heads` (or replay an old one), and each answer is paid from this device's RLN budget.
-const REPAIR_ANSWER_WINDOW: Duration = Duration::from_secs(30);
+/// A peer we have not heard from for this long counts as new again when it reappears.
+const PEER_NEW_AFTER: Duration = Duration::from_secs(300);
+
+/// We greet a new peer with our heads at most this often per topic.
+const GREET_WINDOW: Duration = Duration::from_secs(30);
+
 
 /// Operations waiting for a missing predecessor, per author.
 const MAX_PENDING_PER_AUTHOR: usize = 256;
@@ -201,7 +204,7 @@ pub struct MessageCounts {
     /// Not sent: the (pretend) budget of the epoch was used up. Not part of `messages()`.
     pub blocked: u64,
     /// Repairs not sent: the topic's repair cap of the epoch was reached, or the asking peer was
-    /// answered less than `REPAIR_ANSWER_WINDOW` ago. Not part of `messages()`.
+    /// answered less than `Config::repair_answer_window` ago. Not part of `messages()`.
     pub repairs_capped: u64,
 }
 
@@ -246,6 +249,13 @@ pub struct TopicStats {
     pub sent_this_epoch: MessageCounts,
     pub received: MessageCounts,
     pub peers: Vec<PeerSeen>,
+    /// Operations held because an earlier one of their log is missing.
+    pub waiting: u64,
+    /// The last heads of some peer show operations we don't have.
+    pub behind: bool,
+    /// Peers whose last heads lack some of our own operations (they may have them by now: heads
+    /// are only sent while a peer catches up).
+    pub peers_missing_ours: u64,
 }
 
 /// What an endpoint sent and received, per RLN epoch (aligned to Unix time).
@@ -272,6 +282,18 @@ pub struct Config {
     pub classify_ephemeral: EphemeralClassifier,
     /// At most this many repair messages per topic per epoch. `None`: no cap.
     pub repair_cap_per_topic: Option<u64>,
+    /// While a topic stays active after its first heads (`HEADS_ON_ACTIVATE`), heads are sent
+    /// again after this wait, doubling up to `catch_up_retry_max`. A round is skipped when a
+    /// peer's heads since the last one showed we are not behind and nothing waits for a gap.
+    /// On a slow or lossy network the activation burst is over before any answer can arrive,
+    /// and a lost repair would otherwise never be asked for again. `None`: no retries.
+    pub catch_up_retry: Option<Duration>,
+    pub catch_up_retry_max: Duration,
+    /// A peer's `heads` is answered at most once per this window. Anyone with the topic id can
+    /// send `heads` (or replay an old one), and each answer is paid from this device's RLN
+    /// budget. Shorter than the gap between the activation burst's heads (25 s < 30 s - 0.5 s),
+    /// so that each of them can be answered.
+    pub repair_answer_window: Duration,
 }
 
 impl Default for Config {
@@ -279,6 +301,9 @@ impl Default for Config {
         Self {
             classify_ephemeral: Arc::new(|_| EphemeralKind::Other),
             repair_cap_per_topic: Some(50),
+            catch_up_retry: Some(Duration::from_secs(60)),
+            catch_up_retry_max: Duration::from_secs(RLN_EPOCH_SECONDS),
+            repair_answer_window: Duration::from_secs(25),
         }
     }
 }
@@ -445,6 +470,7 @@ impl LogosSync {
         }
         self.inner.store.insert(&topic, &op).await?;
         state.mark_seen(op.hash);
+        state.note_head(&op);
         self.inner
             .send(&state, &state.keys.ops_topic, &op.frame(), Kind::Relayed)
             .await;
@@ -543,6 +569,14 @@ struct TopicState {
     peers: StdMutex<HashMap<VerifyingKey, Instant>>,
     /// When each peer's `heads` was last answered with a repair.
     answered: StdMutex<HashMap<VerifyingKey, Instant>>,
+    /// The seq of the head of each log we have.
+    own_heads: StdMutex<HashMap<VerifyingKey, u64>>,
+    /// The last heads each peer sent.
+    peer_heads: StdMutex<HashMap<VerifyingKey, HashMap<VerifyingKey, u64>>>,
+    /// Since the last catch-up round, a peer's heads showed we are not behind.
+    confirmed: AtomicBool,
+    /// When we last greeted a new peer with our heads.
+    last_greet: StdMutex<Option<Instant>>,
 }
 
 impl TopicState {
@@ -559,8 +593,32 @@ impl TopicState {
         }
     }
 
-    fn heard_from(&self, peer: VerifyingKey) {
-        self.peers.lock().unwrap().insert(peer, Instant::now());
+    /// Notes the peer; returns whether it is new (or back after `PEER_NEW_AFTER`).
+    fn heard_from(&self, peer: VerifyingKey) -> bool {
+        let now = Instant::now();
+        let before = self.peers.lock().unwrap().insert(peer, now);
+        before.is_none_or(|at| now.duration_since(at) >= PEER_NEW_AFTER)
+    }
+
+    fn note_head(&self, op: &Op) {
+        let mut heads = self.own_heads.lock().unwrap();
+        let seq = heads.entry(op.author()).or_insert(op.seq());
+        *seq = (*seq).max(op.seq());
+    }
+
+    /// Whether `heads` (a peer's) has an operation we lack.
+    fn ahead_of_us(&self, heads: &HashMap<VerifyingKey, u64>) -> bool {
+        let ours = self.own_heads.lock().unwrap();
+        heads
+            .iter()
+            .any(|(author, seq)| ours.get(author).is_none_or(|ours| ours < seq))
+    }
+
+    fn waiting(&self) -> u64 {
+        self.pending
+            .try_lock()
+            .map(|pending| pending.values().map(|log| log.len() as u64).sum())
+            .unwrap_or(0)
     }
 
     fn seen_since(&self, hash: &Hash, since: Instant) -> bool {
@@ -594,7 +652,14 @@ impl Inner {
             counters: StdMutex::new(Counters::default()),
             peers: StdMutex::new(HashMap::new()),
             answered: StdMutex::new(HashMap::new()),
+            own_heads: StdMutex::new(HashMap::new()),
+            peer_heads: StdMutex::new(HashMap::new()),
+            confirmed: AtomicBool::new(false),
+            last_greet: StdMutex::new(None),
         });
+        for op in self.store.heads(&topic).await? {
+            state.note_head(&op);
+        }
 
         // Listen before subscribing, so nothing that arrives is lost.
         let rx = self.bus.messages();
@@ -637,7 +702,24 @@ impl Inner {
                     })
                     .collect();
                 peers.sort_by_key(|p| p.seconds_ago);
+                let me = self.signing_key.verifying_key();
+                let (behind, peers_missing_ours) = {
+                    let peer_heads = state.peer_heads.lock().unwrap();
+                    let behind = peer_heads.values().any(|heads| state.ahead_of_us(heads));
+                    let mine = state.own_heads.lock().unwrap().get(&me).copied();
+                    let missing = match mine {
+                        None => 0,
+                        Some(mine) => peer_heads
+                            .values()
+                            .filter(|heads| heads.get(&me).is_none_or(|seq| *seq < mine))
+                            .count() as u64,
+                    };
+                    (behind, missing)
+                };
                 TopicStats {
+                    waiting: state.waiting(),
+                    behind,
+                    peers_missing_ours,
                     topic: hex::encode(state.topic.to_bytes()),
                     active: state.active.load(Ordering::SeqCst),
                     sent: c.sent.clone(),
@@ -727,6 +809,22 @@ impl Inner {
         self.send_heads(state).await;
     }
 
+    /// A peer we didn't know showed up on an active topic (presence): tell it our heads, so it
+    /// learns at once what it lacks (or what we lack), whatever happened to its own heads.
+    async fn greet(&self, state: &TopicState) {
+        if !state.active.load(Ordering::SeqCst) {
+            return;
+        }
+        {
+            let mut last = state.last_greet.lock().unwrap();
+            if last.is_some_and(|at| at.elapsed() < GREET_WINDOW) {
+                return;
+            }
+            *last = Some(Instant::now());
+        }
+        self.send_heads(state).await;
+    }
+
     /// Create, store and send one of our own operations.
     async fn publish(&self, state: &TopicState, body: Vec<u8>, prune: bool) -> Result<Op, Error> {
         let _guard = state.write_lock.lock().await;
@@ -763,6 +861,7 @@ impl Inner {
         };
         self.store.insert(&state.topic, &op).await?;
         state.mark_seen(op.hash);
+        state.note_head(&op);
 
         let kind = if prune { Kind::Snapshot } else { Kind::Op };
         self.send(state, &state.keys.ops_topic, &op.frame(), kind)
@@ -832,6 +931,7 @@ impl Inner {
             error!("can't store operation: {error}");
             return;
         }
+        state.note_head(&op);
         self.deliver(state, &op).await;
     }
 
@@ -863,19 +963,19 @@ impl Inner {
     }
 
     /// May we answer this peer's `heads` with a repair now? At most once per peer per
-    /// `REPAIR_ANSWER_WINDOW`, so a flood or a replayed `heads` can't make us pay again and again.
+    /// `Config::repair_answer_window`, so a flood or a replayed `heads` can't make us pay again and again.
     fn may_answer(&self, state: &TopicState, from: VerifyingKey) -> bool {
         let mut answered = state.answered.lock().unwrap();
         let now = Instant::now();
         if answered
             .get(&from)
-            .is_some_and(|at| now.duration_since(*at) < REPAIR_ANSWER_WINDOW)
+            .is_some_and(|at| now.duration_since(*at) < self.config.repair_answer_window)
         {
             return false;
         }
         answered.insert(from, now);
         if answered.len() > 1000 {
-            answered.retain(|_, at| now.duration_since(*at) < REPAIR_ANSWER_WINDOW);
+            answered.retain(|_, at| now.duration_since(*at) < self.config.repair_answer_window);
         }
         true
     }
@@ -906,6 +1006,12 @@ impl Inner {
             return;
         }
         state.heard_from(from);
+        let theirs_now: HashMap<VerifyingKey, u64> =
+            heads.iter().map(|(author, seq, _)| (*author, *seq)).collect();
+        if !state.ahead_of_us(&theirs_now) && state.waiting() == 0 {
+            state.confirmed.store(true, Ordering::SeqCst);
+        }
+        state.peer_heads.lock().unwrap().insert(from, theirs_now);
 
         let ours = match self.store.heads(&state.topic).await {
             Ok(ours) => ours,
@@ -982,7 +1088,9 @@ impl Inner {
         if message.author == self.signing_key.verifying_key() || !message.verify(&state.topic) {
             return;
         }
-        state.heard_from(message.author);
+        if state.heard_from(message.author) {
+            self.greet(state).await;
+        }
         let kind = match (self.config.classify_ephemeral)(&message.body.0) {
             EphemeralKind::Presence => Kind::Presence,
             EphemeralKind::Other => Kind::Cursor,
@@ -1076,7 +1184,9 @@ async fn receive_loop(
     }
 }
 
-/// Sends heads when the topic is activated (see `HEADS_ON_ACTIVATE`), and never otherwise.
+/// Sends heads when the topic is activated (see `HEADS_ON_ACTIVATE`), then, while it stays
+/// active, again with a growing wait (`Config::catch_up_retry`) unless a peer's heads showed we
+/// are not behind. Nothing is sent for a topic nobody has open.
 async fn heads_loop(inner: Arc<Inner>, state: Arc<TopicState>) {
     loop {
         state.heads_restart.notified().await;
@@ -1094,7 +1204,24 @@ async fn heads_loop(inner: Arc<Inner>, state: Arc<TopicState>) {
                 }
                 inner.send_heads(&state).await;
             }
-            break;
+            state.confirmed.store(false, Ordering::SeqCst);
+            let Some(mut wait) = inner.config.catch_up_retry else {
+                break;
+            };
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(wait) => {}
+                    _ = state.heads_restart.notified() => continue 'burst,
+                }
+                if !state.active.load(Ordering::SeqCst) {
+                    break 'burst;
+                }
+                let confirmed = state.confirmed.swap(false, Ordering::SeqCst);
+                if !confirmed || state.waiting() > 0 {
+                    inner.send_heads(&state).await;
+                }
+                wait = (wait * 2).min(inner.config.catch_up_retry_max.max(wait));
+            }
         }
     }
 }

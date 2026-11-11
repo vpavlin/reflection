@@ -194,6 +194,12 @@ pub struct TopicStats {
     pub received: MessageCounts,
     /// Other devices heard from on this topic, most recent first.
     pub peers: Vec<PeerSeen>,
+    /// Operations held because an earlier one of their log is missing.
+    pub waiting: u64,
+    /// The last heads of some peer show operations we don't have.
+    pub behind: bool,
+    /// Peers whose last heads lacked some of our own operations.
+    pub peers_missing_ours: u64,
 }
 
 /// What a node sent and received, counted the way RLN meters it: messages per epoch of
